@@ -5,9 +5,21 @@
     {
       "src": "api/index.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "public/**",
+      "use": "@vercel/static"
     }
   ],
   "routes": [
+    {
+      "src": "/styles.css",
+      "dest": "/public/styles.css"
+    },
+    {
+      "src": "/app.js",
+      "dest": "/public/app.js"
+    },
     {
       "src": "/docs",
       "dest": "/api/index.py"
@@ -21,8 +33,8 @@
       "dest": "/api/index.py"
     },
     {
-      "src": "/(.*)",
-      "dest": "/api/index.py"
+      "src": "^/$",
+      "dest": "/public/index.html"
     }
   ]
 }
