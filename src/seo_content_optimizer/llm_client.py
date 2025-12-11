@@ -54,7 +54,7 @@ class LLMClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "claude-3-5-sonnet-20241022",
+        model: str = "claude-sonnet-4-20250514",
     ):
         """
         Initialize the LLM client.
@@ -437,7 +437,7 @@ Return the optimized content with markers. Do not include any explanation."""
 
 def create_llm_client(
     api_key: Optional[str] = None,
-    model: str = "claude-3-5-sonnet-20241022",
+    model: str = "claude-sonnet-4-20250514",
 ) -> LLMClient:
     """
     Factory function to create an LLM client.
