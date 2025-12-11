@@ -2,10 +2,14 @@
 Content extraction from various sources (URLs and Word documents).
 
 This module handles fetching and parsing content from:
-- Web URLs (using requests + trafilatura + BeautifulSoup)
+- Web URLs (using FireCrawl for structured extraction, falling back to trafilatura)
 - Word documents (.docx files using python-docx)
+
+The FireCrawl integration provides superior content extraction that preserves
+the visual structure of web pages including headings, tables, and lists.
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Optional, Union
@@ -21,7 +25,13 @@ try:
 except ImportError:
     trafilatura = None  # type: ignore
 
-from .models import DocxContent, HeadingLevel, PageMeta, ParagraphBlock
+from .models import (
+    ContentBlock,
+    DocxContent,
+    HeadingLevel,
+    PageMeta,
+    ParagraphBlock,
+)
 
 
 # Default headers for web requests
@@ -51,13 +61,23 @@ class ContentExtractionError(Exception):
     pass
 
 
-def fetch_url_content(url: str, timeout: int = 30) -> PageMeta:
+def fetch_url_content(
+    url: str,
+    timeout: int = 30,
+    use_firecrawl: bool = True,
+    firecrawl_api_key: Optional[str] = None,
+) -> PageMeta:
     """
     Fetch and extract content from a URL.
+
+    Uses FireCrawl for structured content extraction when available,
+    falling back to trafilatura/BeautifulSoup otherwise.
 
     Args:
         url: The URL to fetch content from.
         timeout: Request timeout in seconds.
+        use_firecrawl: Whether to attempt FireCrawl extraction first.
+        firecrawl_api_key: Optional FireCrawl API key.
 
     Returns:
         PageMeta object containing extracted content and metadata.
@@ -69,6 +89,22 @@ def fetch_url_content(url: str, timeout: int = 30) -> PageMeta:
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
         raise ContentExtractionError(f"Invalid URL: {url}")
+
+    # Try FireCrawl first if enabled and API key is available
+    if use_firecrawl:
+        api_key = firecrawl_api_key or os.environ.get("FIRECRAWL_API_KEY")
+        if api_key:
+            try:
+                from .firecrawl_client import FireCrawlClient, FireCrawlError
+
+                client = FireCrawlClient(api_key=api_key)
+                if client.is_available:
+                    return client.scrape_url(url, timeout=timeout)
+            except (ImportError, FireCrawlError) as e:
+                # Fall back to traditional extraction
+                pass
+
+    # Fall back to traditional extraction
 
     try:
         response = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)

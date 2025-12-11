@@ -14,7 +14,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .content_sources import ContentExtractionError, load_content
-from .docx_writer import write_optimization_result
+from .docx_writer import DocxWriter
+from .filename_generator import generate_output_filename
 from .keyword_loader import KeywordLoadError, load_keywords
 from .llm_client import LLMClientError
 from .optimizer import ContentOptimizer
@@ -44,8 +45,8 @@ console = Console()
     "--output",
     "-o",
     type=click.Path(path_type=Path),
-    required=True,
-    help="Output path for optimized Word document.",
+    required=False,
+    help="Output path for optimized Word document. If not provided, auto-generates from source.",
 )
 @click.option(
     "--api-key",
@@ -82,7 +83,7 @@ def main(
     source_url: Optional[str],
     source_docx: Optional[Path],
     keywords: Path,
-    output: Path,
+    output: Optional[Path],
     api_key: Optional[str],
     no_faq: bool,
     faq_count: int,
@@ -112,6 +113,12 @@ def main(
         sys.exit(1)
 
     source = source_url or str(source_docx)
+
+    # Generate output filename if not provided
+    if output is None:
+        output = generate_output_filename(source)
+        if verbose:
+            console.print(f"[dim]Auto-generated output: {output}[/dim]")
 
     # Display startup info
     console.print(Panel.fit(
@@ -148,7 +155,16 @@ def main(
 
         # Step 4: Write output
         with console.status("[bold green]Writing output document..."):
-            output_path = write_optimization_result(result, output)
+            writer = DocxWriter()
+            # Create document title from output filename
+            doc_title = output.stem.replace("-optimized-content", "").replace("-", " ")
+            doc_title = f"{doc_title} | Content Improvement"
+            output_path = writer.write(
+                result,
+                output,
+                source_url=source_url,
+                document_title=doc_title,
+            )
 
         # Display summary
         _display_summary(result, output_path, verbose)

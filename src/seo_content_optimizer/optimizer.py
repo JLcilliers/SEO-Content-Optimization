@@ -17,6 +17,7 @@ from .llm_client import (
     ADD_START,
     LLMClient,
     create_llm_client,
+    ensure_markers_present,
     strip_markers,
 )
 from .models import (
@@ -157,6 +158,12 @@ class ContentOptimizer:
             topic=topic,
             max_length=60,
         )
+        # Ensure markers are present if content changed
+        optimized_title = ensure_markers_present(
+            original=current_title or "",
+            optimized=optimized_title,
+            element_type="title",
+        )
         meta_elements.append(
             MetaElement(
                 element_name="Title Tag",
@@ -172,6 +179,12 @@ class ContentOptimizer:
             primary_keyword=primary,
             topic=topic,
             max_length=160,
+        )
+        # Ensure markers are present if content changed
+        optimized_desc = ensure_markers_present(
+            original=current_meta_desc or "",
+            optimized=optimized_desc,
+            element_type="meta_description",
         )
         meta_elements.append(
             MetaElement(
@@ -189,6 +202,12 @@ class ContentOptimizer:
             primary_keyword=primary,
             title=clean_title,
             topic=topic,
+        )
+        # Ensure markers are present if content changed
+        optimized_h1 = ensure_markers_present(
+            original=current_h1 or "",
+            optimized=optimized_h1,
+            element_type="h1",
         )
         meta_elements.append(
             MetaElement(
@@ -245,6 +264,12 @@ class ContentOptimizer:
                     secondary_keywords=secondary[:3],
                     context=f"This is paragraph {i+1} of the content about {analysis.topic}.",
                 )
+                # Ensure markers are present if content changed
+                optimized_text = ensure_markers_present(
+                    original=block.text,
+                    optimized=optimized_text,
+                    element_type="paragraph",
+                )
                 optimized_blocks.append(
                     ParagraphBlock(
                         text=optimized_text,
@@ -266,6 +291,12 @@ class ContentOptimizer:
                         primary_keyword=primary,
                         secondary_keywords=secondary[:2],
                         context="Lightly optimize this paragraph to include relevant keywords.",
+                    )
+                    # Ensure markers are present if content changed
+                    optimized_text = ensure_markers_present(
+                        original=block.text,
+                        optimized=optimized_text,
+                        element_type="paragraph",
                     )
                     optimized_blocks.append(
                         ParagraphBlock(
@@ -321,7 +352,13 @@ Return ONLY the optimized heading."""
                 system="You are an SEO heading optimizer. Return only the optimized heading.",
                 messages=[{"role": "user", "content": prompt}],
             )
-            return response.content[0].text.strip()
+            optimized = response.content[0].text.strip()
+            # Ensure markers are present if content changed
+            return ensure_markers_present(
+                original=text,
+                optimized=optimized,
+                element_type="heading",
+            )
         except Exception:
             # On error, return original
             return text

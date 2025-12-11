@@ -48,6 +48,63 @@ class Keyword:
         return lower_phrase.endswith('?') or lower_phrase.startswith(question_starters)
 
 
+class ContentBlockType(Enum):
+    """Types of content blocks."""
+    PARAGRAPH = "paragraph"
+    HEADING = "heading"
+    TABLE = "table"
+    LIST = "list"
+    BLOCKQUOTE = "blockquote"
+
+
+@dataclass
+class TableCell:
+    """A single cell in a table."""
+    text: str
+    is_header: bool = False
+
+
+@dataclass
+class TableRow:
+    """A row in a table."""
+    cells: list[TableCell] = field(default_factory=list)
+
+
+@dataclass
+class TableBlock:
+    """A table content block."""
+    rows: list[TableRow] = field(default_factory=list)
+    caption: Optional[str] = None
+
+    @property
+    def has_header(self) -> bool:
+        """Check if table has a header row."""
+        if not self.rows:
+            return False
+        return any(cell.is_header for cell in self.rows[0].cells)
+
+    @property
+    def column_count(self) -> int:
+        """Get the number of columns."""
+        if not self.rows:
+            return 0
+        return max(len(row.cells) for row in self.rows)
+
+
+@dataclass
+class ListItem:
+    """A single list item."""
+    text: str
+    level: int = 0  # Nesting level
+
+
+@dataclass
+class ListBlock:
+    """A list content block (ordered or unordered)."""
+    items: list[ListItem] = field(default_factory=list)
+    ordered: bool = False
+
+
 @dataclass
 class ParagraphBlock:
     """A block of content (paragraph or heading) from a document."""
@@ -62,6 +119,43 @@ class ParagraphBlock:
 
 
 @dataclass
+class ContentBlock:
+    """
+    A unified content block that can hold different content types.
+
+    This is a polymorphic wrapper that can contain paragraphs, tables, lists, etc.
+    """
+    block_type: ContentBlockType
+    paragraph: Optional[ParagraphBlock] = None
+    table: Optional[TableBlock] = None
+    list_block: Optional[ListBlock] = None
+
+    @classmethod
+    def from_paragraph(cls, text: str, heading_level: HeadingLevel = HeadingLevel.BODY) -> "ContentBlock":
+        """Create a paragraph content block."""
+        return cls(
+            block_type=ContentBlockType.PARAGRAPH if heading_level == HeadingLevel.BODY else ContentBlockType.HEADING,
+            paragraph=ParagraphBlock(text=text, heading_level=heading_level),
+        )
+
+    @classmethod
+    def from_table(cls, rows: list[TableRow], caption: Optional[str] = None) -> "ContentBlock":
+        """Create a table content block."""
+        return cls(
+            block_type=ContentBlockType.TABLE,
+            table=TableBlock(rows=rows, caption=caption),
+        )
+
+    @classmethod
+    def from_list(cls, items: list[ListItem], ordered: bool = False) -> "ContentBlock":
+        """Create a list content block."""
+        return cls(
+            block_type=ContentBlockType.LIST,
+            list_block=ListBlock(items=items, ordered=ordered),
+        )
+
+
+@dataclass
 class PageMeta:
     """Metadata extracted from a webpage."""
     title: Optional[str] = None
@@ -69,11 +163,18 @@ class PageMeta:
     h1: Optional[str] = None
     content_blocks: list[str] = field(default_factory=list)
     url: Optional[str] = None
+    # Structured content blocks (new - preserves visual layout)
+    structured_blocks: list[ContentBlock] = field(default_factory=list)
 
     @property
     def full_text(self) -> str:
         """Get all content as a single string."""
         return "\n\n".join(self.content_blocks)
+
+    @property
+    def has_structured_content(self) -> bool:
+        """Check if structured content is available."""
+        return len(self.structured_blocks) > 0
 
 
 @dataclass

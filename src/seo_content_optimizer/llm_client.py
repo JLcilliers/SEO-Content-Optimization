@@ -474,6 +474,41 @@ def strip_markers(text: str) -> str:
     return text.replace(ADD_START, "").replace(ADD_END, "")
 
 
+def ensure_markers_present(
+    original: str,
+    optimized: str,
+    element_type: str = "content",
+) -> str:
+    """
+    Ensure that optimized content has markers when it differs from original.
+
+    If the LLM made changes but didn't include markers, this function wraps
+    the entire optimized content in markers to ensure visibility.
+
+    Args:
+        original: Original content before optimization.
+        optimized: LLM-optimized content (may or may not have markers).
+        element_type: Type of element being optimized (for logging).
+
+    Returns:
+        Content with markers guaranteed (either from LLM or added by fallback).
+    """
+    # If markers are already present, return as-is
+    if has_markers(optimized):
+        return optimized
+
+    # If content is identical to original, no need for markers
+    clean_optimized = optimized.strip()
+    clean_original = original.strip() if original else ""
+
+    if clean_optimized == clean_original:
+        return optimized
+
+    # LLM made changes but didn't add markers - wrap the entire output
+    # This is a fallback to ensure changes are visible
+    return f"{ADD_START}{optimized}{ADD_END}"
+
+
 def has_markers(text: str) -> bool:
     """Check if text contains any ADD markers."""
     return ADD_START in text or ADD_END in text

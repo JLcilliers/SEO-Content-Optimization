@@ -26,6 +26,7 @@ from seo_content_optimizer.content_sources import fetch_url_content, load_docx_c
 from seo_content_optimizer.keyword_loader import load_keywords
 from seo_content_optimizer.optimizer import ContentOptimizer
 from seo_content_optimizer.docx_writer import DocxWriter
+from seo_content_optimizer.filename_generator import suggest_filename_for_download
 from seo_content_optimizer.models import Keyword
 
 app = FastAPI(
@@ -70,6 +71,7 @@ class OptimizeResponse(BaseModel):
     meta_elements: Optional[list[dict]] = None
     faq_items: Optional[list[dict]] = None
     document_base64: Optional[str] = None
+    suggested_filename: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -181,12 +183,23 @@ async def optimize_from_url(request: OptimizeURLRequest):
             max_secondary=request.max_secondary,
         )
 
-        # Generate DOCX
+        # Generate suggested filename from URL
+        suggested_filename = suggest_filename_for_download(request.source_url)
+
+        # Generate DOCX with source URL and document title
         writer = DocxWriter()
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             output_path = Path(tmp.name)
 
-        writer.write(result, output_path)
+        # Create document title from filename (without extension and suffix)
+        document_title = suggested_filename.replace(".docx", "").replace("-optimized-content", "")
+
+        writer.write(
+            result,
+            output_path,
+            source_url=request.source_url,
+            document_title=f"{document_title} | Content Improvement",
+        )
 
         # Read and encode the document
         with open(output_path, "rb") as f:
@@ -215,6 +228,7 @@ async def optimize_from_url(request: OptimizeURLRequest):
                 for faq in result.faq_items
             ],
             document_base64=doc_base64,
+            suggested_filename=suggested_filename,
         )
 
     except Exception as e:
@@ -270,12 +284,27 @@ async def optimize_from_file(
             max_secondary=max_secondary,
         )
 
+        # Generate better filename for download
+        download_filename = suggest_filename_for_download(
+            source="file-upload",
+            original_filename=file.filename,
+        )
+
+        # Create document title from original filename
+        original_name = Path(file.filename).stem if file.filename else "document"
+        document_title = f"{original_name} | Content Improvement"
+
         # Generate output DOCX
         writer = DocxWriter()
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             output_path = Path(tmp.name)
 
-        writer.write(result, output_path)
+        writer.write(
+            result,
+            output_path,
+            source_url=None,  # No URL for file uploads
+            document_title=document_title,
+        )
 
         # Clean up input temp files
         docx_path.unlink()
@@ -291,7 +320,7 @@ async def optimize_from_file(
             io.BytesIO(doc_bytes),
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
-                "Content-Disposition": f'attachment; filename="optimized_{file.filename}"'
+                "Content-Disposition": f'attachment; filename="{download_filename}"'
             }
         )
 
@@ -347,12 +376,23 @@ async def optimize_url_with_keywords_file(
             max_secondary=max_secondary,
         )
 
-        # Generate DOCX
+        # Generate suggested filename from URL
+        suggested_filename = suggest_filename_for_download(source_url)
+
+        # Create document title from filename (without extension and suffix)
+        document_title = suggested_filename.replace(".docx", "").replace("-optimized-content", "")
+
+        # Generate DOCX with source URL and document title
         writer = DocxWriter()
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             output_path = Path(tmp.name)
 
-        writer.write(result, output_path)
+        writer.write(
+            result,
+            output_path,
+            source_url=source_url,
+            document_title=f"{document_title} | Content Improvement",
+        )
 
         # Read and encode the document
         with open(output_path, "rb") as f:
@@ -381,6 +421,7 @@ async def optimize_url_with_keywords_file(
                 for faq in result.faq_items
             ],
             document_base64=doc_base64,
+            suggested_filename=suggested_filename,
         )
 
     except Exception as e:
