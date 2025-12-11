@@ -2,39 +2,46 @@
 const API_BASE = '';
 
 // DOM Elements
-const urlForm = document.getElementById('url-form');
-const fileForm = document.getElementById('file-form');
-const tabs = document.querySelectorAll('.tab');
+const optimizerForm = document.getElementById('optimizer-form');
 const resultsCard = document.getElementById('results');
 const errorCard = document.getElementById('error-message');
 const downloadBtn = document.getElementById('download-btn');
+const submitBtn = document.getElementById('submit-btn');
+
+// Toggle buttons
+const toggleBtns = document.querySelectorAll('.toggle-btn');
+const urlSource = document.getElementById('url-source');
+const fileSource = document.getElementById('file-source');
 
 // File upload elements
 const contentUpload = document.getElementById('content-upload');
 const contentFileInput = document.getElementById('content-file');
-const keywordsUpload = document.getElementById('keywords-upload');
-const keywordsFileInput = document.getElementById('keywords-file');
 
 // State
 let currentDocumentBase64 = null;
 let currentFileName = 'optimized-content.docx';
+let currentSourceType = 'url';
 
-// Tab switching
-tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
-        const targetTab = tab.dataset.tab;
+// Source type toggle
+toggleBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+        const sourceType = btn.dataset.source;
+        currentSourceType = sourceType;
 
-        // Update tab states
-        tabs.forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
+        // Update button states
+        toggleBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
 
-        // Update form visibility
-        document.querySelectorAll('.form').forEach(form => {
-            form.classList.remove('active');
-        });
-        document.getElementById(`${targetTab}-form`).classList.add('active');
+        // Update source input visibility
+        if (sourceType === 'url') {
+            urlSource.classList.add('active');
+            fileSource.classList.remove('active');
+        } else {
+            urlSource.classList.remove('active');
+            fileSource.classList.add('active');
+        }
 
-        // Hide results and errors when switching tabs
+        // Hide results and errors when switching
         hideResults();
         hideError();
     });
@@ -75,7 +82,6 @@ function updateFileDisplay(uploadEl, file) {
 }
 
 setupFileUpload(contentUpload, contentFileInput);
-setupFileUpload(keywordsUpload, keywordsFileInput);
 
 // Parse keywords from text input
 function parseKeywords(text) {
@@ -100,12 +106,10 @@ function parseKeywords(text) {
     });
 }
 
-// URL Form submission
-urlForm.addEventListener('submit', async (e) => {
+// Unified form submission
+optimizerForm.addEventListener('submit', async (e) => {
     e.preventDefault();
 
-    const submitBtn = document.getElementById('url-submit');
-    const sourceUrl = document.getElementById('source-url').value;
     const keywordsText = document.getElementById('keywords-text').value;
     const faqCount = parseInt(document.getElementById('faq-count').value);
     const maxSecondary = parseInt(document.getElementById('max-secondary').value);
@@ -124,33 +128,11 @@ urlForm.addEventListener('submit', async (e) => {
     hideResults();
 
     try {
-        const response = await fetch(`${API_BASE}/api/optimize/url`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                source_url: sourceUrl,
-                keywords: keywords,
-                generate_faq: faqCount > 0,
-                faq_count: faqCount,
-                max_secondary: maxSecondary
-            })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-            throw new Error(data.detail || 'Failed to optimize content');
+        if (currentSourceType === 'url') {
+            await optimizeFromUrl(keywords, faqCount, maxSecondary);
+        } else {
+            await optimizeFromFile(keywords, faqCount, maxSecondary);
         }
-
-        // Store document for download
-        currentDocumentBase64 = data.document_base64;
-        currentFileName = `optimized-${new URL(sourceUrl).hostname}.docx`;
-
-        // Display results
-        displayResults(data);
-
     } catch (error) {
         showError(error.message);
     } finally {
@@ -159,72 +141,89 @@ urlForm.addEventListener('submit', async (e) => {
     }
 });
 
-// File Form submission
-fileForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
+// Optimize from URL
+async function optimizeFromUrl(keywords, faqCount, maxSecondary) {
+    const sourceUrl = document.getElementById('source-url').value;
 
-    const submitBtn = document.getElementById('file-submit');
+    if (!sourceUrl) {
+        throw new Error('Please enter a URL');
+    }
+
+    const response = await fetch(`${API_BASE}/api/optimize/url`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            source_url: sourceUrl,
+            keywords: keywords,
+            generate_faq: faqCount > 0,
+            faq_count: faqCount,
+            max_secondary: maxSecondary
+        })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(data.detail || 'Failed to optimize content');
+    }
+
+    // Store document for download
+    currentDocumentBase64 = data.document_base64;
+    currentFileName = `optimized-${new URL(sourceUrl).hostname}.docx`;
+
+    // Display results
+    displayResults(data);
+}
+
+// Optimize from file
+async function optimizeFromFile(keywords, faqCount, maxSecondary) {
     const contentFile = contentFileInput.files[0];
-    const keywordsFile = keywordsFileInput.files[0];
-    const faqCount = parseInt(document.getElementById('file-faq-count').value);
-    const maxSecondary = parseInt(document.getElementById('file-max-secondary').value);
 
     if (!contentFile) {
-        showError('Please select a content document');
-        return;
-    }
-    if (!keywordsFile) {
-        showError('Please select a keywords file');
-        return;
+        throw new Error('Please select a content document');
     }
 
-    // Show loading state
-    submitBtn.classList.add('loading');
-    submitBtn.disabled = true;
-    hideError();
-    hideResults();
+    // Create form data with file and keywords as JSON
+    const formData = new FormData();
+    formData.append('file', contentFile);
 
-    try {
-        const formData = new FormData();
-        formData.append('file', contentFile);
-        formData.append('keywords_file', keywordsFile);
-        formData.append('generate_faq', faqCount > 0);
-        formData.append('faq_count', faqCount);
-        formData.append('max_secondary', maxSecondary);
+    // Create a keywords file from the parsed keywords
+    const keywordsJson = JSON.stringify(keywords);
+    const keywordsBlob = new Blob([keywordsJson], { type: 'application/json' });
+    formData.append('keywords_file', keywordsBlob, 'keywords.json');
 
-        const response = await fetch(`${API_BASE}/api/optimize/file`, {
-            method: 'POST',
-            body: formData
-        });
+    formData.append('generate_faq', faqCount > 0);
+    formData.append('faq_count', faqCount);
+    formData.append('max_secondary', maxSecondary);
 
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.detail || 'Failed to optimize content');
-        }
+    const response = await fetch(`${API_BASE}/api/optimize/file`, {
+        method: 'POST',
+        body: formData
+    });
 
-        // For file upload, response is the document directly
-        const blob = await response.blob();
-        currentDocumentBase64 = null;
-        currentFileName = `optimized-${contentFile.name}`;
-
-        // Create download link and trigger download
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = currentFileName;
-        a.click();
-        URL.revokeObjectURL(url);
-
-        // Show success message
-        showSuccess('Document optimized and downloaded successfully!');
-
-    } catch (error) {
-        showError(error.message);
-    } finally {
-        submitBtn.classList.remove('loading');
-        submitBtn.disabled = false;
+    if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to optimize content');
     }
-});
+
+    // For file upload, response is the document directly
+    const blob = await response.blob();
+    currentDocumentBase64 = null;
+    currentFileName = `optimized-${contentFile.name}`;
+
+    // Create download link and trigger download
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = currentFileName;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    // Show success message
+    showSuccess('Document optimized and downloaded successfully!');
+}
 
 // Display results
 function displayResults(data) {

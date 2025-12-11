@@ -38,149 +38,131 @@
                     <p>Transform your content with AI-powered SEO optimization. Get keyword-optimized content with highlighted changes in seconds.</p>
                 </section>
 
-                <!-- Optimizer Form -->
-                <div class="optimizer-card">
-                    <!-- Tab Navigation -->
-                    <div class="tabs">
-                        <button class="tab active" data-tab="url">
-                            <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-                            </svg>
-                            From URL
-                        </button>
-                        <button class="tab" data-tab="file">
-                            <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                                <polyline points="14 2 14 8 20 8"/>
-                                <line x1="16" y1="13" x2="8" y2="13"/>
-                                <line x1="16" y1="17" x2="8" y2="17"/>
-                                <polyline points="10 9 9 9 8 9"/>
-                            </svg>
-                            From File
+                <!-- Unified Optimizer Form -->
+                <form id="optimizer-form" class="optimizer-card">
+                    <div class="form-content">
+                        <!-- Keywords Section (Always Visible) -->
+                        <div class="form-section">
+                            <h3 class="section-title">
+                                <span class="section-number">1</span>
+                                Keywords
+                            </h3>
+                            <div class="form-group">
+                                <label for="keywords-text">Enter your target keywords</label>
+                                <textarea
+                                    id="keywords-text"
+                                    placeholder="Enter keywords, one per line. Format: keyword, volume, difficulty, intent&#10;&#10;Example:&#10;SEO optimization, 1200, 45, informational&#10;content marketing, 800, 52, transactional"
+                                    rows="6"
+                                    required
+                                ></textarea>
+                                <span class="helper-text">Add keywords with optional metrics (volume, difficulty, intent)</span>
+                            </div>
+                        </div>
+
+                        <!-- Content Source Section -->
+                        <div class="form-section">
+                            <h3 class="section-title">
+                                <span class="section-number">2</span>
+                                Content Source
+                            </h3>
+
+                            <!-- Source Type Toggle -->
+                            <div class="source-toggle">
+                                <button type="button" class="toggle-btn active" data-source="url">
+                                    <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                                    </svg>
+                                    From URL
+                                </button>
+                                <button type="button" class="toggle-btn" data-source="file">
+                                    <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                        <polyline points="14 2 14 8 20 8"/>
+                                        <line x1="16" y1="13" x2="8" y2="13"/>
+                                        <line x1="16" y1="17" x2="8" y2="17"/>
+                                    </svg>
+                                    Upload File
+                                </button>
+                            </div>
+
+                            <!-- URL Input -->
+                            <div id="url-source" class="source-input active">
+                                <div class="form-group">
+                                    <label for="source-url">Content URL</label>
+                                    <input
+                                        type="url"
+                                        id="source-url"
+                                        placeholder="https://example.com/your-article"
+                                    >
+                                    <span class="helper-text">Enter the URL of the page you want to optimize</span>
+                                </div>
+                            </div>
+
+                            <!-- File Upload -->
+                            <div id="file-source" class="source-input">
+                                <div class="form-group">
+                                    <label>Content Document (.docx)</label>
+                                    <div class="file-upload" id="content-upload">
+                                        <input type="file" id="content-file" accept=".docx" hidden>
+                                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                            <polyline points="17 8 12 3 7 8"/>
+                                            <line x1="12" y1="3" x2="12" y2="15"/>
+                                        </svg>
+                                        <span class="upload-text">Drop your .docx file here or click to browse</span>
+                                        <span class="upload-file-name"></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Options Section -->
+                        <div class="form-section">
+                            <h3 class="section-title">
+                                <span class="section-number">3</span>
+                                Options
+                            </h3>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="faq-count">FAQ Items</label>
+                                    <select id="faq-count">
+                                        <option value="0">No FAQ</option>
+                                        <option value="3">3 items</option>
+                                        <option value="4" selected>4 items</option>
+                                        <option value="5">5 items</option>
+                                        <option value="6">6 items</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="max-secondary">Max Secondary Keywords</label>
+                                    <select id="max-secondary">
+                                        <option value="3">3 keywords</option>
+                                        <option value="5" selected>5 keywords</option>
+                                        <option value="7">7 keywords</option>
+                                        <option value="10">10 keywords</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Submit Button -->
+                        <button type="submit" class="btn btn-primary" id="submit-btn">
+                            <span class="btn-text">
+                                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                                </svg>
+                                Optimize Content
+                            </span>
+                            <span class="btn-loading">
+                                <svg class="spinner" viewBox="0 0 24 24">
+                                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-dasharray="32" stroke-linecap="round"/>
+                                </svg>
+                                Optimizing...
+                            </span>
                         </button>
                     </div>
-
-                    <!-- URL Form -->
-                    <form id="url-form" class="form active">
-                        <div class="form-group">
-                            <label for="source-url">Content URL</label>
-                            <input
-                                type="url"
-                                id="source-url"
-                                placeholder="https://example.com/your-article"
-                                required
-                            >
-                            <span class="helper-text">Enter the URL of the page you want to optimize</span>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="keywords-text">Keywords</label>
-                            <textarea
-                                id="keywords-text"
-                                placeholder="Enter keywords, one per line. Format: keyword, volume, difficulty, intent&#10;&#10;Example:&#10;SEO optimization, 1200, 45, informational&#10;content marketing, 800, 52, transactional"
-                                rows="6"
-                                required
-                            ></textarea>
-                            <span class="helper-text">Add keywords with optional metrics (volume, difficulty, intent)</span>
-                        </div>
-
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="faq-count">FAQ Items</label>
-                                <select id="faq-count">
-                                    <option value="0">No FAQ</option>
-                                    <option value="3">3 items</option>
-                                    <option value="4" selected>4 items</option>
-                                    <option value="5">5 items</option>
-                                    <option value="6">6 items</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label for="max-secondary">Max Secondary Keywords</label>
-                                <select id="max-secondary">
-                                    <option value="3">3 keywords</option>
-                                    <option value="5" selected>5 keywords</option>
-                                    <option value="7">7 keywords</option>
-                                    <option value="10">10 keywords</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        <button type="submit" class="btn btn-primary" id="url-submit">
-                            <span class="btn-text">Optimize Content</span>
-                            <span class="btn-loading">
-                                <svg class="spinner" viewBox="0 0 24 24">
-                                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-dasharray="32" stroke-linecap="round"/>
-                                </svg>
-                                Optimizing...
-                            </span>
-                        </button>
-                    </form>
-
-                    <!-- File Form -->
-                    <form id="file-form" class="form">
-                        <div class="form-group">
-                            <label>Content Document</label>
-                            <div class="file-upload" id="content-upload">
-                                <input type="file" id="content-file" accept=".docx" hidden>
-                                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                                    <polyline points="17 8 12 3 7 8"/>
-                                    <line x1="12" y1="3" x2="12" y2="15"/>
-                                </svg>
-                                <span class="upload-text">Drop your .docx file here or click to browse</span>
-                                <span class="upload-file-name"></span>
-                            </div>
-                        </div>
-
-                        <div class="form-group">
-                            <label>Keywords File</label>
-                            <div class="file-upload" id="keywords-upload">
-                                <input type="file" id="keywords-file" accept=".csv,.xlsx,.xls" hidden>
-                                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                                    <polyline points="17 8 12 3 7 8"/>
-                                    <line x1="12" y1="3" x2="12" y2="15"/>
-                                </svg>
-                                <span class="upload-text">Drop your CSV or Excel file here</span>
-                                <span class="upload-file-name"></span>
-                            </div>
-                        </div>
-
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="file-faq-count">FAQ Items</label>
-                                <select id="file-faq-count">
-                                    <option value="0">No FAQ</option>
-                                    <option value="3">3 items</option>
-                                    <option value="4" selected>4 items</option>
-                                    <option value="5">5 items</option>
-                                    <option value="6">6 items</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label for="file-max-secondary">Max Secondary Keywords</label>
-                                <select id="file-max-secondary">
-                                    <option value="3">3 keywords</option>
-                                    <option value="5" selected>5 keywords</option>
-                                    <option value="7">7 keywords</option>
-                                    <option value="10">10 keywords</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        <button type="submit" class="btn btn-primary" id="file-submit">
-                            <span class="btn-text">Optimize Content</span>
-                            <span class="btn-loading">
-                                <svg class="spinner" viewBox="0 0 24 24">
-                                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-dasharray="32" stroke-linecap="round"/>
-                                </svg>
-                                Optimizing...
-                            </span>
-                        </button>
-                    </form>
-                </div>
+                </form>
 
                 <!-- Results Section -->
                 <div id="results" class="results-card hidden">
