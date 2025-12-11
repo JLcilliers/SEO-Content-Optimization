@@ -124,7 +124,7 @@ async def optimize_from_url(request: OptimizeURLRequest):
         keywords = [
             Keyword(
                 phrase=kw.phrase,
-                volume=kw.volume,
+                search_volume=kw.volume,
                 difficulty=kw.difficulty,
                 intent=kw.intent,
             )
