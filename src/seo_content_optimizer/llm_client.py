@@ -77,7 +77,10 @@ class LLMClient:
                 "anthropic package not installed. Run: pip install anthropic"
             )
 
-        self.client = anthropic.Anthropic(api_key=self.api_key)
+        self.client = anthropic.Anthropic(
+            api_key=self.api_key,
+            timeout=60.0,  # 60 second timeout for serverless environments
+        )
 
     def rewrite_with_markers(
         self,
