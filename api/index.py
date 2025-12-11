@@ -13,7 +13,8 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 # Add src to path for imports
@@ -77,13 +78,18 @@ class HealthResponse(BaseModel):
     version: str
 
 
-@app.get("/", response_model=HealthResponse)
+# Path to public directory for static files
+PUBLIC_DIR = Path(__file__).parent.parent / "public"
+
+
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    """Root endpoint with health check."""
-    return HealthResponse(
-        status="healthy",
-        version="1.0.0"
-    )
+    """Serve the main UI."""
+    index_path = PUBLIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(index_path, media_type="text/html")
+    # Fallback to health check if no frontend
+    return HTMLResponse(content="<h1>SEO Content Optimizer API</h1><p>Visit <a href='/docs'>/docs</a> for API documentation.</p>")
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -270,3 +276,21 @@ async def api_info():
         "documentation": "/docs",
         "openapi": "/openapi.json",
     }
+
+
+@app.get("/styles.css")
+async def serve_css():
+    """Serve CSS file."""
+    css_path = PUBLIC_DIR / "styles.css"
+    if css_path.exists():
+        return FileResponse(css_path, media_type="text/css")
+    raise HTTPException(status_code=404, detail="CSS file not found")
+
+
+@app.get("/app.js")
+async def serve_js():
+    """Serve JavaScript file."""
+    js_path = PUBLIC_DIR / "app.js"
+    if js_path.exists():
+        return FileResponse(js_path, media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="JavaScript file not found")
