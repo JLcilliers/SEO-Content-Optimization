@@ -101,6 +101,46 @@ async def health_check():
     )
 
 
+@app.get("/api/test-llm")
+async def test_llm():
+    """Test LLM connection endpoint."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {"status": "error", "message": "ANTHROPIC_API_KEY not set"}
+
+    try:
+        import anthropic
+        import httpx
+
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(60.0, connect=30.0),
+            follow_redirects=True,
+        )
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            http_client=http_client,
+        )
+
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=50,
+            messages=[{"role": "user", "content": "Say hello in 5 words or less."}],
+        )
+        return {
+            "status": "success",
+            "response": response.content[0].text,
+            "model": response.model,
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "status": "error",
+            "error_type": type(e).__name__,
+            "message": str(e),
+            "traceback": traceback.format_exc(),
+        }
+
+
 @app.post("/api/optimize/url", response_model=OptimizeResponse)
 async def optimize_from_url(request: OptimizeURLRequest):
     """
