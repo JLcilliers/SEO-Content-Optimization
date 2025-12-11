@@ -5,6 +5,7 @@ This module generates the final optimized .docx output with:
 - Reading guide at the top
 - Current vs Optimized Meta Elements table
 - Optimized content with green-highlighted changes
+- Poppins font throughout with consistent spacing
 """
 
 import re
@@ -12,11 +13,12 @@ from pathlib import Path
 from typing import Optional, Union
 
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches, Pt
+from docx.shared import Inches, Pt, Twips
 from docx.text.paragraph import Paragraph
 
 from .llm_client import ADD_END, ADD_START
@@ -72,13 +74,18 @@ def set_cell_shading(cell, color: str) -> None:
     tcPr.append(shd)
 
 
-def add_marked_text(paragraph: Paragraph, text: str) -> None:
+def add_marked_text(paragraph: Paragraph, text: str, font_name: str = "Poppins") -> None:
     """
     Write `text` into `paragraph`, converting [[[ADD]]]/[[[ENDADD]]] segments
     into BRIGHT_GREEN highlighted runs, and leaving all other text normal.
 
     This is the single canonical way to add optimized text with highlights.
     Text is sanitized to remove invalid XML characters before insertion.
+
+    Args:
+        paragraph: The paragraph to add text to.
+        text: Text with optional [[[ADD]]]...[[[ENDADD]]] markers.
+        font_name: Font to use for all runs (default: Poppins).
     """
     # Sanitize text to remove invalid XML characters that cause Word errors
     text = sanitize_for_xml(text)
@@ -88,24 +95,28 @@ def add_marked_text(paragraph: Paragraph, text: str) -> None:
         if start == -1:
             # No more markers - add remaining text as plain
             if text:
-                paragraph.add_run(text)
+                run = paragraph.add_run(text)
+                run.font.name = font_name
             break
 
         # Add plain prefix before the marker
         if start > 0:
-            paragraph.add_run(text[:start])
+            run = paragraph.add_run(text[:start])
+            run.font.name = font_name
 
         # Find closing marker
         end = text.find(MARK_END, start)
         if end == -1:
             # Malformed: no closing marker, dump the rest as plain text
-            paragraph.add_run(text[start:])
+            run = paragraph.add_run(text[start:])
+            run.font.name = font_name
             break
 
         # Extract and add highlighted content
         highlighted = text[start + len(MARK_START): end]
         if highlighted:
             run = paragraph.add_run(highlighted)
+            run.font.name = font_name
             # CRITICAL: Use the official enum for proper Word compatibility
             run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
 
@@ -129,11 +140,89 @@ class DocxWriter:
         self._setup_styles()
 
     def _setup_styles(self) -> None:
-        """Configure document styles."""
-        # Set default font
-        style = self.doc.styles["Normal"]
-        style.font.name = "Calibri"
-        style.font.size = Pt(11)
+        """Configure document styles with Poppins font and consistent spacing."""
+        # Font settings
+        FONT_NAME = "Poppins"
+        BODY_SIZE = Pt(11)
+
+        # Spacing settings (in points)
+        PARA_SPACE_BEFORE = Pt(6)
+        PARA_SPACE_AFTER = Pt(6)
+        LINE_SPACING = 1.15  # 115% line spacing for readability
+
+        # Configure Normal style (base for all text)
+        normal_style = self.doc.styles["Normal"]
+        normal_style.font.name = FONT_NAME
+        normal_style.font.size = BODY_SIZE
+        normal_style.paragraph_format.space_before = PARA_SPACE_BEFORE
+        normal_style.paragraph_format.space_after = PARA_SPACE_AFTER
+        normal_style.paragraph_format.line_spacing = LINE_SPACING
+
+        # Set font for East Asian text fallback (required for proper font embedding)
+        normal_style._element.rPr.rFonts.set(qn("w:eastAsia"), FONT_NAME)
+
+        # Configure Title style
+        if "Title" in self.doc.styles:
+            title_style = self.doc.styles["Title"]
+            title_style.font.name = FONT_NAME
+            title_style.font.size = Pt(26)
+            title_style.font.bold = True
+            title_style.paragraph_format.space_before = Pt(0)
+            title_style.paragraph_format.space_after = Pt(12)
+            title_style.paragraph_format.line_spacing = 1.0
+
+        # Configure Heading styles (H1-H6)
+        heading_sizes = {
+            "Heading 1": Pt(20),
+            "Heading 2": Pt(16),
+            "Heading 3": Pt(14),
+            "Heading 4": Pt(12),
+            "Heading 5": Pt(11),
+            "Heading 6": Pt(11),
+        }
+        heading_space_before = {
+            "Heading 1": Pt(18),
+            "Heading 2": Pt(14),
+            "Heading 3": Pt(12),
+            "Heading 4": Pt(10),
+            "Heading 5": Pt(8),
+            "Heading 6": Pt(8),
+        }
+        heading_space_after = {
+            "Heading 1": Pt(8),
+            "Heading 2": Pt(6),
+            "Heading 3": Pt(6),
+            "Heading 4": Pt(4),
+            "Heading 5": Pt(4),
+            "Heading 6": Pt(4),
+        }
+
+        for style_name, font_size in heading_sizes.items():
+            if style_name in self.doc.styles:
+                style = self.doc.styles[style_name]
+                style.font.name = FONT_NAME
+                style.font.size = font_size
+                style.font.bold = True
+                style.paragraph_format.space_before = heading_space_before.get(style_name, Pt(12))
+                style.paragraph_format.space_after = heading_space_after.get(style_name, Pt(6))
+                style.paragraph_format.line_spacing = 1.1
+
+        # Configure List styles
+        for list_style_name in ["List Bullet", "List Number", "List Paragraph"]:
+            if list_style_name in self.doc.styles:
+                list_style = self.doc.styles[list_style_name]
+                list_style.font.name = FONT_NAME
+                list_style.font.size = BODY_SIZE
+                list_style.paragraph_format.space_before = Pt(2)
+                list_style.paragraph_format.space_after = Pt(2)
+                list_style.paragraph_format.line_spacing = LINE_SPACING
+
+        # Configure Table styles
+        if "Table Grid" in self.doc.styles:
+            table_style = self.doc.styles["Table Grid"]
+            # Table paragraph style settings
+            table_style.font.name = FONT_NAME
+            table_style.font.size = Pt(10)
 
     def write(
         self,
@@ -590,6 +679,21 @@ def create_simple_docx_with_highlights(
         Path to created document.
     """
     doc = Document()
+
+    # Set Poppins font as default
+    normal_style = doc.styles["Normal"]
+    normal_style.font.name = "Poppins"
+    normal_style.font.size = Pt(11)
+    normal_style.paragraph_format.space_before = Pt(6)
+    normal_style.paragraph_format.space_after = Pt(6)
+    normal_style.paragraph_format.line_spacing = 1.15
+
+    # Configure Heading 1 style
+    if "Heading 1" in doc.styles:
+        h1_style = doc.styles["Heading 1"]
+        h1_style.font.name = "Poppins"
+        h1_style.font.size = Pt(20)
+        h1_style.font.bold = True
 
     # Add title
     doc.add_heading(title, level=1)

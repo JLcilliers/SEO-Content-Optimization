@@ -27,13 +27,21 @@ ADD_END = "[[[ENDADD]]]"
 # System prompt for SEO optimization
 SEO_SYSTEM_PROMPT = """You are an expert SEO content optimizer. Your task is to enhance content for search engine optimization while maintaining readability and the original message.
 
-CRITICAL RULES:
+CRITICAL RULES - MUST FOLLOW:
 1. Keep all original text unless modification is necessary for SEO
 2. Mark ALL new or changed text with [[[ADD]]] and [[[ENDADD]]] markers
 3. Never delete significant original content - only add or modify
 4. Maintain the original tone and style
 5. Do not invent facts or make claims not supported by the original content
 6. Keep sentences natural and readable - avoid keyword stuffing
+
+STRICT TOPICAL CONSTRAINTS - VIOLATIONS WILL BE REJECTED:
+7. NEVER introduce industries, verticals, or business types not already in the original content
+8. NEVER add mentions of: cannabis, hemp, CBD, gambling, adult content, firearms, or other high-risk industries unless they are explicitly in the original
+9. NEVER claim the company "specializes in" or "serves" industries not mentioned in the original
+10. ONLY use keywords that directly relate to what the page is actually about
+11. Do not stuff the company/brand name repeatedly - keep brand mentions reasonable and natural
+12. If a keyword doesn't fit the page topic, DO NOT force it in - skip it entirely
 
 MARKER FORMAT:
 - Wrap only the NEW or CHANGED portions with markers
@@ -95,6 +103,7 @@ class LLMClient:
         secondary_keywords: list[str],
         context: str = "",
         max_tokens: int = 4096,
+        content_topics: list[str] = None,
     ) -> str:
         """
         Rewrite content with SEO optimization, marking all changes.
@@ -105,12 +114,13 @@ class LLMClient:
             secondary_keywords: List of secondary keywords to include.
             context: Additional context about the content/business.
             max_tokens: Maximum tokens in response.
+            content_topics: List of main topics from original content (for constraints).
 
         Returns:
             Optimized content with [[[ADD]]]...[[[ENDADD]]] markers.
         """
         user_prompt = self._build_rewrite_prompt(
-            content, primary_keyword, secondary_keywords, context
+            content, primary_keyword, secondary_keywords, context, content_topics
         )
 
         try:
@@ -268,6 +278,7 @@ Return ONLY the optimized H1 with markers, nothing else."""
         secondary_keywords: list[str],
         question_keywords: list[str],
         num_items: int = 4,
+        content_topics: list[str] = None,
     ) -> list[dict[str, str]]:
         """
         Generate FAQ items based on keywords.
@@ -278,6 +289,7 @@ Return ONLY the optimized H1 with markers, nothing else."""
             secondary_keywords: Secondary keywords to include.
             question_keywords: Question-form keywords to address.
             num_items: Number of FAQ items to generate.
+            content_topics: List of main topics from the original content (for constraints).
 
         Returns:
             List of dicts with 'question' and 'answer' keys, with markers.
@@ -285,19 +297,36 @@ Return ONLY the optimized H1 with markers, nothing else."""
         questions_list = "\n".join(f"- {q}" for q in question_keywords) if question_keywords else "None provided"
         keywords_list = ", ".join([primary_keyword] + secondary_keywords[:3])
 
+        # Build topic constraint if available
+        topic_constraint = ""
+        if content_topics:
+            topic_constraint = f"""
+ALLOWED TOPICS (FAQs must ONLY address these topics from the original content):
+{', '.join(content_topics[:15])}
+
+"""
+
         prompt = f"""Generate {num_items} FAQ items for a page about: {topic}
 
 Keywords to incorporate naturally: {keywords_list}
 
 Question keywords to address (if relevant):
 {questions_list}
+{topic_constraint}
+STRICT REQUIREMENTS - READ CAREFULLY:
+1. Each question must be a common user question DIRECTLY related to the page topic: "{topic}"
+2. Answers should be 2-4 sentences, helpful and informative
+3. Naturally include relevant keywords in answers
+4. Mark all text with [[[ADD]]]...[[[ENDADD]]] since these are all new
+5. Do NOT make up specific facts, prices, or claims not verifiable
 
-Requirements:
-- Each question should be a common user question about the topic
-- Answers should be 2-4 sentences, helpful and informative
-- Naturally include relevant keywords in answers
-- Mark all text with [[[ADD]]]...[[[ENDADD]]] since these are all new
-- Do NOT make up specific facts, prices, or claims not verifiable
+ABSOLUTE RESTRICTIONS - VIOLATIONS WILL BE REJECTED:
+- NEVER create FAQs about industries or verticals not mentioned in the original content
+- NEVER introduce new business types like "hair salon", "restaurant", "CBD", "hemp", "gambling", etc.
+- NEVER claim the company specializes in or serves markets not in the original content
+- FAQs must be DIRECTLY about the page topic: "{topic}"
+- If the page is about "X vs Y comparison", FAQs should be about that comparison
+- Do NOT create generic industry FAQs - be SPECIFIC to this page's content
 
 Return in this exact format:
 Q: [[[ADD]]]Question text here?[[[ENDADD]]]
@@ -312,7 +341,12 @@ A: [[[ADD]]]Next answer.[[[ENDADD]]]
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=2000,
-                system="You are an SEO FAQ content expert. Generate helpful, keyword-rich FAQ items.",
+                system="""You are an SEO FAQ content expert. Generate helpful FAQ items that are STRICTLY on-topic.
+
+CRITICAL: You must NEVER introduce industries, verticals, or business types not in the original content.
+If the page is about "Payment Processing Comparison", FAQs should be about payment processing comparison - NOT about specific industries like restaurants, salons, or any high-risk industries.
+
+Only generate FAQs that someone reading the specific page would actually ask.""",
                 messages=[{"role": "user", "content": prompt}],
             )
 
@@ -371,29 +405,45 @@ RECOMMENDED: <comma-separated list of recommended keywords>"""
         primary_keyword: str,
         secondary_keywords: list[str],
         context: str,
+        content_topics: list[str] = None,
     ) -> str:
         """Build the rewrite prompt for content optimization."""
         secondary_list = ", ".join(secondary_keywords) if secondary_keywords else "None"
 
+        # Build topic constraint
+        topic_constraint = ""
+        if content_topics:
+            topic_constraint = f"""
+CONTENT TOPICS (only optimize using concepts related to these):
+{', '.join(content_topics[:10])}
+"""
+
         return f"""Optimize the following content for SEO.
 
-PRIMARY KEYWORD (must appear in first 100 words and several times throughout): {primary_keyword}
+PRIMARY KEYWORD (include naturally if it fits): {primary_keyword}
 
-SECONDARY KEYWORDS (sprinkle naturally where appropriate): {secondary_list}
+SECONDARY KEYWORDS (use ONLY if they fit naturally): {secondary_list}
 
 ADDITIONAL CONTEXT: {context or "None provided"}
-
+{topic_constraint}
 ORIGINAL CONTENT:
 {content}
 
 INSTRUCTIONS:
 1. Preserve all original content and meaning
 2. Add the primary keyword naturally in the first paragraph if not present
-3. Weave in secondary keywords where they fit naturally
+3. Weave in secondary keywords ONLY where they fit naturally
 4. Add clarifying phrases or sentences if they help include keywords naturally
 5. Mark ALL additions and changes with [[[ADD]]]...[[[ENDADD]]] markers
 6. Keep the same paragraph structure
 7. Do not be repetitive or stuffed - maintain natural reading flow
+
+STRICT RESTRICTIONS - MUST FOLLOW:
+- NEVER introduce industries, verticals, or business types not in the original content
+- NEVER add references to: cannabis, hemp, CBD, gambling, salons, restaurants, or other industries unless they are ALREADY in the content
+- NEVER claim the company "specializes in" or "serves" markets not mentioned in the original
+- If a keyword doesn't fit naturally, DO NOT force it - skip it entirely
+- Keep brand/company name mentions reasonable - do not stuff
 
 Return the optimized content with markers. Do not include any explanation."""
 

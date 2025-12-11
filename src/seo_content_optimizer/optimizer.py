@@ -6,12 +6,19 @@ This module coordinates the optimization process:
 - Uses LLM for intelligent rewriting
 - Generates FAQ sections
 - Produces structured optimization results
+
+IMPORTANT: All keywords are filtered for topical relevance BEFORE optimization
+to prevent injection of off-topic industries or spammy content.
 """
 
 from typing import Optional, Union
 
 from .analysis import ContentAnalysis, analyze_content
 from .content_sources import convert_page_meta_to_blocks
+from .keyword_filter import (
+    filter_keywords_for_content,
+    get_content_topics,
+)
 from .llm_client import (
     ADD_END,
     ADD_START,
@@ -82,17 +89,56 @@ class ContentOptimizer:
         Returns:
             OptimizationResult with all optimized content.
         """
-        # Step 1: Analyze content
-        analysis = analyze_content(content, keywords)
+        # Step 0: Extract full content text for keyword filtering
+        if isinstance(content, PageMeta):
+            full_text = content.full_text
+        else:
+            full_text = content.full_text
 
-        # Step 2: Create keyword plan
-        keyword_plan = create_keyword_plan(
+        # Step 0.5: Filter keywords for topical relevance BEFORE any optimization
+        # This is CRITICAL to prevent injection of off-topic industries/verticals
+        filtered_keywords, filter_results = filter_keywords_for_content(
             keywords=keywords,
+            content_text=full_text,
+            min_overlap=0.5,  # Require 50% token overlap for non-exact matches
+        )
+
+        # Log rejected keywords for debugging (in verbose mode this could be exposed)
+        rejected = [r for r in filter_results if not r.is_allowed]
+        if rejected:
+            # Store rejection info for potential debugging
+            self._rejected_keywords = rejected
+
+        # If no keywords passed the filter, use a relaxed filter
+        if not filtered_keywords:
+            # Try again with lower threshold
+            filtered_keywords, _ = filter_keywords_for_content(
+                keywords=keywords,
+                content_text=full_text,
+                min_overlap=0.3,
+            )
+
+        # If still no keywords, fall back to original list but log warning
+        if not filtered_keywords:
+            filtered_keywords = keywords[:10]  # Take top keywords by volume
+
+        # Extract content topics for LLM context
+        content_topics = get_content_topics(full_text, top_n=15)
+
+        # Step 1: Analyze content (with filtered keywords)
+        analysis = analyze_content(content, filtered_keywords)
+
+        # Step 2: Create keyword plan (with filtered keywords)
+        keyword_plan = create_keyword_plan(
+            keywords=filtered_keywords,
             content=content,
             analysis=analysis,
             max_secondary=max_secondary,
             max_questions=faq_count,
         )
+
+        # Store content topics for use in LLM calls
+        self._content_topics = content_topics
 
         # Step 3: Get current meta elements
         if isinstance(content, PageMeta):
@@ -234,6 +280,9 @@ class ContentOptimizer:
         primary = keyword_plan.primary.phrase
         secondary = [kw.phrase for kw in keyword_plan.secondary]
 
+        # Get content topics for constraints (set during optimize())
+        content_topics = getattr(self, '_content_topics', None)
+
         # Determine which blocks to optimize
         # Focus on: first paragraph, headings, and a few body paragraphs
         for i, block in enumerate(blocks):
@@ -263,6 +312,7 @@ class ContentOptimizer:
                     primary_keyword=primary,
                     secondary_keywords=secondary[:3],
                     context=f"This is paragraph {i+1} of the content about {analysis.topic}.",
+                    content_topics=content_topics,
                 )
                 # Ensure markers are present if content changed
                 optimized_text = ensure_markers_present(
@@ -291,6 +341,7 @@ class ContentOptimizer:
                         primary_keyword=primary,
                         secondary_keywords=secondary[:2],
                         context="Lightly optimize this paragraph to include relevant keywords.",
+                        content_topics=content_topics,
                     )
                     # Ensure markers are present if content changed
                     optimized_text = ensure_markers_present(
@@ -370,12 +421,16 @@ Return ONLY the optimized heading."""
         num_items: int,
     ) -> list[FAQItem]:
         """Generate FAQ items."""
+        # Get content topics for constraints (set during optimize())
+        content_topics = getattr(self, '_content_topics', None)
+
         faq_data = self.llm.generate_faq_items(
             topic=topic,
             primary_keyword=keyword_plan.primary.phrase,
             secondary_keywords=[kw.phrase for kw in keyword_plan.secondary],
             question_keywords=[kw.phrase for kw in keyword_plan.long_tail_questions],
             num_items=num_items,
+            content_topics=content_topics,
         )
 
         return [
