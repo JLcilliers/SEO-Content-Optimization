@@ -18,6 +18,7 @@ from .content_sources import convert_page_meta_to_blocks
 from .keyword_filter import (
     filter_keywords_for_content,
     get_content_topics,
+    log_filter_results,
 )
 from .llm_client import (
     ADD_END,
@@ -103,6 +104,10 @@ class ContentOptimizer:
             min_overlap=0.5,  # Require 50% token overlap for non-exact matches
         )
 
+        # Log filter results for debugging
+        filter_summary = log_filter_results(filter_results, verbose=False)
+        self._filter_summary = filter_summary
+
         # Log rejected keywords for debugging (in verbose mode this could be exposed)
         rejected = [r for r in filter_results if not r.is_allowed]
         if rejected:
@@ -110,20 +115,39 @@ class ContentOptimizer:
             self._rejected_keywords = rejected
 
         # If no keywords passed the filter, use a relaxed filter
+        # BUT NEVER allow blocked terms through even with relaxed filter
         if not filtered_keywords:
-            # Try again with lower threshold
+            # Try again with lower threshold but same blocklist
             filtered_keywords, _ = filter_keywords_for_content(
                 keywords=keywords,
                 content_text=full_text,
-                min_overlap=0.3,
+                min_overlap=0.3,  # More relaxed but blocklist still applies
             )
 
-        # If still no keywords, fall back to original list but log warning
+        # If still no keywords, fall back to generic keywords that don't have blocked terms
+        # NEVER use original list unfiltered
         if not filtered_keywords:
-            filtered_keywords = keywords[:10]  # Take top keywords by volume
+            # Only take keywords that don't contain blocked terms
+            safe_keywords = []
+            from .keyword_filter import contains_blocked_term
+            for kw in keywords:
+                if not contains_blocked_term(kw.phrase, full_text):
+                    safe_keywords.append(kw)
+                if len(safe_keywords) >= 10:
+                    break
+            filtered_keywords = safe_keywords
 
         # Extract content topics for LLM context
         content_topics = get_content_topics(full_text, top_n=15)
+
+        # Step 0.6: Brand name detection and control
+        brand_name = self._detect_brand_name(content)
+        brand_count = full_text.lower().count(brand_name.lower()) if brand_name else 0
+        self._brand_context = {
+            "name": brand_name,
+            "original_count": brand_count,
+            "max_extra_mentions": min(3, max(1, brand_count)),
+        }
 
         # Step 1: Analyze content (with filtered keywords)
         analysis = analyze_content(content, filtered_keywords)
@@ -313,6 +337,7 @@ class ContentOptimizer:
                     secondary_keywords=secondary[:3],
                     context=f"This is paragraph {i+1} of the content about {analysis.topic}.",
                     content_topics=content_topics,
+                    brand_context=getattr(self, '_brand_context', None),
                 )
                 # Ensure markers are present if content changed
                 optimized_text = ensure_markers_present(
@@ -342,6 +367,7 @@ class ContentOptimizer:
                         secondary_keywords=secondary[:2],
                         context="Lightly optimize this paragraph to include relevant keywords.",
                         content_topics=content_topics,
+                        brand_context=getattr(self, '_brand_context', None),
                     )
                     # Ensure markers are present if content changed
                     optimized_text = ensure_markers_present(
@@ -423,6 +449,7 @@ Return ONLY the optimized heading."""
         """Generate FAQ items."""
         # Get content topics for constraints (set during optimize())
         content_topics = getattr(self, '_content_topics', None)
+        brand_context = getattr(self, '_brand_context', None)
 
         faq_data = self.llm.generate_faq_items(
             topic=topic,
@@ -431,6 +458,7 @@ Return ONLY the optimized heading."""
             question_keywords=[kw.phrase for kw in keyword_plan.long_tail_questions],
             num_items=num_items,
             content_topics=content_topics,
+            brand_context=brand_context,
         )
 
         return [
@@ -517,6 +545,70 @@ Return ONLY the optimized heading."""
             reasons.append("Optimized for SEO while maintaining clarity")
 
         return "; ".join(reasons)
+
+    def _detect_brand_name(
+        self,
+        content: Union[PageMeta, DocxContent],
+    ) -> str:
+        """
+        Detect the brand/company name from the content.
+
+        Uses multiple signals:
+        - URL domain (most reliable)
+        - H1 heading
+        - Title tag
+
+        Args:
+            content: The content being optimized.
+
+        Returns:
+            Detected brand name or empty string.
+        """
+        import re
+
+        brand_name = ""
+
+        if isinstance(content, PageMeta):
+            # Try to extract from URL domain
+            if content.url:
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(content.url)
+                    domain = parsed.netloc.lower()
+                    # Remove www. and .com/.io/.net etc
+                    domain = re.sub(r'^www\.', '', domain)
+                    domain = re.sub(r'\.(com|io|net|org|co|ai)$', '', domain)
+                    # Capitalize as brand name
+                    brand_name = domain.title()
+                except Exception:
+                    pass
+
+            # Fallback: look at H1 or title
+            if not brand_name:
+                # Look for common brand patterns in H1/title
+                h1 = content.h1 or ""
+                title = content.title or ""
+
+                # Look for capitalized words at start of title
+                for text in [title, h1]:
+                    words = text.split()
+                    if words:
+                        # First capitalized word is often the brand
+                        first_word = words[0].strip(":|–-")
+                        if first_word and first_word[0].isupper():
+                            brand_name = first_word
+                            break
+
+        elif isinstance(content, DocxContent):
+            # For DOCX, try H1
+            h1 = content.h1 or ""
+            words = h1.split()
+            if words:
+                first_word = words[0].strip(":|–-")
+                if first_word and first_word[0].isupper():
+                    brand_name = first_word
+
+        return brand_name
 
 
 def optimize_content(

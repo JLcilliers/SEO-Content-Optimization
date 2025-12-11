@@ -104,6 +104,7 @@ class LLMClient:
         context: str = "",
         max_tokens: int = 4096,
         content_topics: list[str] = None,
+        brand_context: dict = None,
     ) -> str:
         """
         Rewrite content with SEO optimization, marking all changes.
@@ -115,12 +116,13 @@ class LLMClient:
             context: Additional context about the content/business.
             max_tokens: Maximum tokens in response.
             content_topics: List of main topics from original content (for constraints).
+            brand_context: Dict with brand name and mention limits.
 
         Returns:
             Optimized content with [[[ADD]]]...[[[ENDADD]]] markers.
         """
         user_prompt = self._build_rewrite_prompt(
-            content, primary_keyword, secondary_keywords, context, content_topics
+            content, primary_keyword, secondary_keywords, context, content_topics, brand_context
         )
 
         try:
@@ -279,6 +281,7 @@ Return ONLY the optimized H1 with markers, nothing else."""
         question_keywords: list[str],
         num_items: int = 4,
         content_topics: list[str] = None,
+        brand_context: dict = None,
     ) -> list[dict[str, str]]:
         """
         Generate FAQ items based on keywords.
@@ -290,6 +293,7 @@ Return ONLY the optimized H1 with markers, nothing else."""
             question_keywords: Question-form keywords to address.
             num_items: Number of FAQ items to generate.
             content_topics: List of main topics from the original content (for constraints).
+            brand_context: Dict with brand name and mention limits.
 
         Returns:
             List of dicts with 'question' and 'answer' keys, with markers.
@@ -306,27 +310,39 @@ ALLOWED TOPICS (FAQs must ONLY address these topics from the original content):
 
 """
 
+        # Build brand control instruction
+        brand_instruction = ""
+        if brand_context and brand_context.get("name"):
+            brand_name = brand_context["name"]
+            brand_instruction = f"""
+BRAND NAME: "{brand_name}"
+- Mention the brand sparingly and naturally
+- Do NOT stuff the brand name into every answer
+"""
+
         prompt = f"""Generate {num_items} FAQ items for a page about: {topic}
 
-Keywords to incorporate naturally: {keywords_list}
-
+ALLOWED KEYWORDS (use ONLY these): {keywords_list}
+{brand_instruction}
 Question keywords to address (if relevant):
 {questions_list}
 {topic_constraint}
 STRICT REQUIREMENTS - READ CAREFULLY:
 1. Each question must be a common user question DIRECTLY related to the page topic: "{topic}"
 2. Answers should be 2-4 sentences, helpful and informative
-3. Naturally include relevant keywords in answers
+3. ONLY use keywords from the ALLOWED KEYWORDS list above - no other keywords
 4. Mark all text with [[[ADD]]]...[[[ENDADD]]] since these are all new
 5. Do NOT make up specific facts, prices, or claims not verifiable
 
 ABSOLUTE RESTRICTIONS - VIOLATIONS WILL BE REJECTED:
-- NEVER create FAQs about industries or verticals not mentioned in the original content
-- NEVER introduce new business types like "hair salon", "restaurant", "CBD", "hemp", "gambling", etc.
-- NEVER claim the company specializes in or serves markets not in the original content
-- FAQs must be DIRECTLY about the page topic: "{topic}"
-- If the page is about "X vs Y comparison", FAQs should be about that comparison
-- Do NOT create generic industry FAQs - be SPECIFIC to this page's content
+- ONLY use keywords from the EXACT list provided above - introducing other keywords is forbidden
+- NEVER create FAQs about industries or verticals not mentioned in the page topic
+- NEVER introduce new business types like "hair salon", "restaurant", "CBD", "hemp", "cannabis", "gambling", "spa", "merchant services", etc.
+- NEVER mention "high-risk" industries, "merchant accounts", or industry-specific payment processing
+- NEVER claim the company specializes in or serves markets not explicitly in "{topic}"
+- FAQs must be DIRECTLY and ONLY about: "{topic}"
+- If the page is about "X vs Y comparison", FAQs should ONLY be about that comparison
+- Do NOT create generic industry FAQs - be SPECIFIC to this page's exact content
 
 Return in this exact format:
 Q: [[[ADD]]]Question text here?[[[ENDADD]]]
@@ -343,10 +359,14 @@ A: [[[ADD]]]Next answer.[[[ENDADD]]]
                 max_tokens=2000,
                 system="""You are an SEO FAQ content expert. Generate helpful FAQ items that are STRICTLY on-topic.
 
-CRITICAL: You must NEVER introduce industries, verticals, or business types not in the original content.
-If the page is about "Payment Processing Comparison", FAQs should be about payment processing comparison - NOT about specific industries like restaurants, salons, or any high-risk industries.
+CRITICAL RULES - MUST FOLLOW:
+1. You must NEVER introduce industries, verticals, or business types not in the original topic
+2. You must ONLY use keywords from the exact list provided - no other keywords
+3. If the page is about "Payment Processing Comparison", FAQs should be about that comparison ONLY
+4. NEVER mention: restaurants, salons, spas, CBD, hemp, cannabis, gambling, high-risk merchants, or ANY specific industry
+5. Keep answers focused on the exact topic provided
 
-Only generate FAQs that someone reading the specific page would actually ask.""",
+Only generate FAQs that someone reading the specific page would actually ask about THAT SPECIFIC topic.""",
                 messages=[{"role": "user", "content": prompt}],
             )
 
@@ -406,6 +426,7 @@ RECOMMENDED: <comma-separated list of recommended keywords>"""
         secondary_keywords: list[str],
         context: str,
         content_topics: list[str] = None,
+        brand_context: dict = None,
     ) -> str:
         """Build the rewrite prompt for content optimization."""
         secondary_list = ", ".join(secondary_keywords) if secondary_keywords else "None"
@@ -418,6 +439,21 @@ CONTENT TOPICS (only optimize using concepts related to these):
 {', '.join(content_topics[:10])}
 """
 
+        # Build brand control instruction
+        brand_instruction = ""
+        if brand_context and brand_context.get("name"):
+            brand_name = brand_context["name"]
+            original_count = brand_context.get("original_count", 0)
+            max_extra = brand_context.get("max_extra_mentions", 2)
+            brand_instruction = f"""
+BRAND NAME CONTROL (STRICT):
+- The brand name is: "{brand_name}"
+- It already appears {original_count} times in the original content
+- You may add the brand name at most {max_extra} additional times
+- Do NOT stuff the brand name repeatedly
+- If adding the brand name would sound unnatural, DO NOT add it
+"""
+
         return f"""Optimize the following content for SEO.
 
 PRIMARY KEYWORD (include naturally if it fits): {primary_keyword}
@@ -425,7 +461,7 @@ PRIMARY KEYWORD (include naturally if it fits): {primary_keyword}
 SECONDARY KEYWORDS (use ONLY if they fit naturally): {secondary_list}
 
 ADDITIONAL CONTEXT: {context or "None provided"}
-{topic_constraint}
+{topic_constraint}{brand_instruction}
 ORIGINAL CONTENT:
 {content}
 
@@ -438,12 +474,14 @@ INSTRUCTIONS:
 6. Keep the same paragraph structure
 7. Do not be repetitive or stuffed - maintain natural reading flow
 
-STRICT RESTRICTIONS - MUST FOLLOW:
+ABSOLUTE RESTRICTIONS - VIOLATIONS WILL BE REJECTED:
+- ONLY use keywords from the EXACT list provided above - no other keywords allowed
 - NEVER introduce industries, verticals, or business types not in the original content
-- NEVER add references to: cannabis, hemp, CBD, gambling, salons, restaurants, or other industries unless they are ALREADY in the content
+- NEVER add references to: cannabis, hemp, CBD, THC, gambling, casinos, salons, spas, restaurants, firearms, adult content, or ANY other industries unless they are ALREADY in the original content
 - NEVER claim the company "specializes in" or "serves" markets not mentioned in the original
-- If a keyword doesn't fit naturally, DO NOT force it - skip it entirely
-- Keep brand/company name mentions reasonable - do not stuff
+- NEVER invent or add industry-specific terms like "merchant services," "high-risk processing," "POS systems for [industry]" unless these EXACT phrases are in the original
+- If a keyword doesn't fit naturally or introduces off-topic concepts, DO NOT use it - skip it entirely
+- Keep brand/company name mentions within the limits specified above
 
 Return the optimized content with markers. Do not include any explanation."""
 
