@@ -309,6 +309,15 @@ body {
     display: block;
 }
 
+/* Keywords Inputs */
+.keywords-input {
+    display: none;
+}
+
+.keywords-input.active {
+    display: block;
+}
+
 .form-group {
     margin-bottom: 24px;
 }

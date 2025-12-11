@@ -8,28 +8,36 @@ const errorCard = document.getElementById('error-message');
 const downloadBtn = document.getElementById('download-btn');
 const submitBtn = document.getElementById('submit-btn');
 
-// Toggle buttons
-const toggleBtns = document.querySelectorAll('.toggle-btn');
+// Content source toggle buttons
+const sourceToggleBtns = document.querySelectorAll('.toggle-btn[data-source]');
 const urlSource = document.getElementById('url-source');
 const fileSource = document.getElementById('file-source');
+
+// Keywords toggle buttons
+const keywordsToggleBtns = document.querySelectorAll('.toggle-btn[data-keywords]');
+const keywordsTextSource = document.getElementById('keywords-text-source');
+const keywordsFileSource = document.getElementById('keywords-file-source');
 
 // File upload elements
 const contentUpload = document.getElementById('content-upload');
 const contentFileInput = document.getElementById('content-file');
+const keywordsUpload = document.getElementById('keywords-upload');
+const keywordsFileInput = document.getElementById('keywords-file');
 
 // State
 let currentDocumentBase64 = null;
 let currentFileName = 'optimized-content.docx';
 let currentSourceType = 'url';
+let currentKeywordsType = 'text';
 
-// Source type toggle
-toggleBtns.forEach(btn => {
+// Content source type toggle
+sourceToggleBtns.forEach(btn => {
     btn.addEventListener('click', () => {
         const sourceType = btn.dataset.source;
         currentSourceType = sourceType;
 
         // Update button states
-        toggleBtns.forEach(b => b.classList.remove('active'));
+        sourceToggleBtns.forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
 
         // Update source input visibility
@@ -39,6 +47,31 @@ toggleBtns.forEach(btn => {
         } else {
             urlSource.classList.remove('active');
             fileSource.classList.add('active');
+        }
+
+        // Hide results and errors when switching
+        hideResults();
+        hideError();
+    });
+});
+
+// Keywords source type toggle
+keywordsToggleBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+        const keywordsType = btn.dataset.keywords;
+        currentKeywordsType = keywordsType;
+
+        // Update button states
+        keywordsToggleBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        // Update keywords input visibility
+        if (keywordsType === 'text') {
+            keywordsTextSource.classList.add('active');
+            keywordsFileSource.classList.remove('active');
+        } else {
+            keywordsTextSource.classList.remove('active');
+            keywordsFileSource.classList.add('active');
         }
 
         // Hide results and errors when switching
@@ -82,6 +115,7 @@ function updateFileDisplay(uploadEl, file) {
 }
 
 setupFileUpload(contentUpload, contentFileInput);
+setupFileUpload(keywordsUpload, keywordsFileInput);
 
 // Parse keywords from text input
 function parseKeywords(text) {
@@ -110,16 +144,8 @@ function parseKeywords(text) {
 optimizerForm.addEventListener('submit', async (e) => {
     e.preventDefault();
 
-    const keywordsText = document.getElementById('keywords-text').value;
     const faqCount = parseInt(document.getElementById('faq-count').value);
     const maxSecondary = parseInt(document.getElementById('max-secondary').value);
-
-    // Parse keywords
-    const keywords = parseKeywords(keywordsText);
-    if (keywords.length === 0) {
-        showError('Please enter at least one keyword');
-        return;
-    }
 
     // Show loading state
     submitBtn.classList.add('loading');
@@ -128,10 +154,24 @@ optimizerForm.addEventListener('submit', async (e) => {
     hideResults();
 
     try {
-        if (currentSourceType === 'url') {
-            await optimizeFromUrl(keywords, faqCount, maxSecondary);
+        // Determine if we're using file upload for keywords
+        if (currentKeywordsType === 'file') {
+            // File-based keywords - must use file endpoint
+            await optimizeWithKeywordsFile(faqCount, maxSecondary);
         } else {
-            await optimizeFromFile(keywords, faqCount, maxSecondary);
+            // Text-based keywords
+            const keywordsText = document.getElementById('keywords-text').value;
+            const keywords = parseKeywords(keywordsText);
+
+            if (keywords.length === 0) {
+                throw new Error('Please enter at least one keyword');
+            }
+
+            if (currentSourceType === 'url') {
+                await optimizeFromUrl(keywords, faqCount, maxSecondary);
+            } else {
+                await optimizeFromFileWithTextKeywords(keywords, faqCount, maxSecondary);
+            }
         }
     } catch (error) {
         showError(error.message);
@@ -141,7 +181,7 @@ optimizerForm.addEventListener('submit', async (e) => {
     }
 });
 
-// Optimize from URL
+// Optimize from URL with text keywords
 async function optimizeFromUrl(keywords, faqCount, maxSecondary) {
     const sourceUrl = document.getElementById('source-url').value;
 
@@ -177,8 +217,8 @@ async function optimizeFromUrl(keywords, faqCount, maxSecondary) {
     displayResults(data);
 }
 
-// Optimize from file
-async function optimizeFromFile(keywords, faqCount, maxSecondary) {
+// Optimize from file with text keywords
+async function optimizeFromFileWithTextKeywords(keywords, faqCount, maxSecondary) {
     const contentFile = contentFileInput.files[0];
 
     if (!contentFile) {
@@ -223,6 +263,83 @@ async function optimizeFromFile(keywords, faqCount, maxSecondary) {
 
     // Show success message
     showSuccess('Document optimized and downloaded successfully!');
+}
+
+// Optimize with keywords file (Excel/CSV)
+async function optimizeWithKeywordsFile(faqCount, maxSecondary) {
+    const keywordsFile = keywordsFileInput.files[0];
+
+    if (!keywordsFile) {
+        throw new Error('Please select a keywords file');
+    }
+
+    const formData = new FormData();
+    formData.append('keywords_file', keywordsFile);
+    formData.append('generate_faq', faqCount > 0);
+    formData.append('faq_count', faqCount);
+    formData.append('max_secondary', maxSecondary);
+
+    if (currentSourceType === 'url') {
+        // URL content with file keywords
+        const sourceUrl = document.getElementById('source-url').value;
+        if (!sourceUrl) {
+            throw new Error('Please enter a URL');
+        }
+        formData.append('source_url', sourceUrl);
+
+        const response = await fetch(`${API_BASE}/api/optimize/url-with-keywords-file`, {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to optimize content');
+        }
+
+        const data = await response.json();
+
+        // Store document for download
+        currentDocumentBase64 = data.document_base64;
+        currentFileName = `optimized-${new URL(sourceUrl).hostname}.docx`;
+
+        // Display results
+        displayResults(data);
+    } else {
+        // File content with file keywords
+        const contentFile = contentFileInput.files[0];
+        if (!contentFile) {
+            throw new Error('Please select a content document');
+        }
+
+        formData.append('file', contentFile);
+
+        const response = await fetch(`${API_BASE}/api/optimize/file`, {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to optimize content');
+        }
+
+        // For file upload, response is the document directly
+        const blob = await response.blob();
+        currentDocumentBase64 = null;
+        currentFileName = `optimized-${contentFile.name}`;
+
+        // Create download link and trigger download
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = currentFileName;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        // Show success message
+        showSuccess('Document optimized and downloaded successfully!');
+    }
 }
 
 // Display results

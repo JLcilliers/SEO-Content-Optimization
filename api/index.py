@@ -259,6 +259,94 @@ async def optimize_from_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/optimize/url-with-keywords-file", response_model=OptimizeResponse)
+async def optimize_url_with_keywords_file(
+    source_url: str = Form(..., description="URL to fetch content from"),
+    keywords_file: UploadFile = File(..., description="Keywords file (CSV or Excel)"),
+    generate_faq: bool = Form(True),
+    faq_count: int = Form(4),
+    max_secondary: int = Form(5),
+):
+    """
+    Optimize content from a URL using keywords from an uploaded file.
+
+    Fetches content from the provided URL, loads keywords from the uploaded
+    CSV/Excel file, and returns the optimized document.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="ANTHROPIC_API_KEY environment variable not set"
+        )
+
+    try:
+        # Fetch content from URL
+        content = fetch_url_content(source_url)
+
+        # Save keywords file temporarily
+        kw_suffix = Path(keywords_file.filename).suffix.lower()
+        with tempfile.NamedTemporaryFile(suffix=kw_suffix, delete=False) as tmp:
+            kw_bytes = await keywords_file.read()
+            tmp.write(kw_bytes)
+            keywords_path = Path(tmp.name)
+
+        # Load keywords from file
+        keywords = load_keywords(keywords_path)
+
+        # Clean up temp file
+        keywords_path.unlink()
+
+        # Run optimization
+        optimizer = ContentOptimizer(api_key=api_key)
+        result = optimizer.optimize(
+            content=content,
+            keywords=keywords,
+            generate_faq=generate_faq,
+            faq_count=faq_count,
+            max_secondary=max_secondary,
+        )
+
+        # Generate DOCX
+        writer = DocxWriter()
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+            output_path = Path(tmp.name)
+
+        writer.write(result, output_path)
+
+        # Read and encode the document
+        with open(output_path, "rb") as f:
+            doc_bytes = f.read()
+        doc_base64 = base64.b64encode(doc_bytes).decode("utf-8")
+
+        # Clean up temp file
+        output_path.unlink()
+
+        return OptimizeResponse(
+            success=True,
+            message="Content optimized successfully",
+            primary_keyword=result.primary_keyword,
+            secondary_keywords=result.secondary_keywords,
+            meta_elements=[
+                {
+                    "element_name": me.element_name,
+                    "current": me.current,
+                    "optimized": me.optimized,
+                    "why_changed": me.why_changed,
+                }
+                for me in result.meta_elements
+            ],
+            faq_items=[
+                {"question": faq.question, "answer": faq.answer}
+                for faq in result.faq_items
+            ],
+            document_base64=doc_base64,
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/info")
 async def api_info():
     """Get API information and usage instructions."""
@@ -269,8 +357,9 @@ async def api_info():
         "endpoints": {
             "GET /": "Health check",
             "GET /api/health": "Health check",
-            "POST /api/optimize/url": "Optimize content from URL",
-            "POST /api/optimize/file": "Optimize uploaded Word document",
+            "POST /api/optimize/url": "Optimize content from URL with JSON keywords",
+            "POST /api/optimize/url-with-keywords-file": "Optimize content from URL with keywords file",
+            "POST /api/optimize/file": "Optimize uploaded Word document with keywords file",
             "GET /api/info": "This endpoint",
         },
         "documentation": "/docs",

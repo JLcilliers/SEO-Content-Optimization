@@ -47,15 +47,57 @@
                                 <span class="section-number">1</span>
                                 Keywords
                             </h3>
-                            <div class="form-group">
-                                <label for="keywords-text">Enter your target keywords</label>
-                                <textarea
-                                    id="keywords-text"
-                                    placeholder="Enter keywords, one per line. Format: keyword, volume, difficulty, intent&#10;&#10;Example:&#10;SEO optimization, 1200, 45, informational&#10;content marketing, 800, 52, transactional"
-                                    rows="6"
-                                    required
-                                ></textarea>
-                                <span class="helper-text">Add keywords with optional metrics (volume, difficulty, intent)</span>
+
+                            <!-- Keywords Source Toggle -->
+                            <div class="source-toggle">
+                                <button type="button" class="toggle-btn active" data-keywords="text">
+                                    <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                        <polyline points="14 2 14 8 20 8"/>
+                                        <line x1="16" y1="13" x2="8" y2="13"/>
+                                        <line x1="16" y1="17" x2="8" y2="17"/>
+                                    </svg>
+                                    Type Keywords
+                                </button>
+                                <button type="button" class="toggle-btn" data-keywords="file">
+                                    <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="17 8 12 3 7 8"/>
+                                        <line x1="12" y1="3" x2="12" y2="15"/>
+                                    </svg>
+                                    Upload Excel/CSV
+                                </button>
+                            </div>
+
+                            <!-- Text Input for Keywords -->
+                            <div id="keywords-text-source" class="keywords-input active">
+                                <div class="form-group">
+                                    <label for="keywords-text">Enter your target keywords</label>
+                                    <textarea
+                                        id="keywords-text"
+                                        placeholder="Enter keywords, one per line. Format: keyword, volume, difficulty, intent&#10;&#10;Example:&#10;SEO optimization, 1200, 45, informational&#10;content marketing, 800, 52, transactional"
+                                        rows="6"
+                                    ></textarea>
+                                    <span class="helper-text">Add keywords with optional metrics (volume, difficulty, intent)</span>
+                                </div>
+                            </div>
+
+                            <!-- File Upload for Keywords -->
+                            <div id="keywords-file-source" class="keywords-input">
+                                <div class="form-group">
+                                    <label>Keywords File (.xlsx, .csv)</label>
+                                    <div class="file-upload" id="keywords-upload">
+                                        <input type="file" id="keywords-file" accept=".xlsx,.xls,.csv" hidden>
+                                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                            <polyline points="17 8 12 3 7 8"/>
+                                            <line x1="12" y1="3" x2="12" y2="15"/>
+                                        </svg>
+                                        <span class="upload-text">Drop your Excel or CSV file here or click to browse</span>
+                                        <span class="upload-file-name"></span>
+                                    </div>
+                                    <span class="helper-text">Upload a file with columns: keyword, volume (optional), difficulty (optional), intent (optional)</span>
+                                </div>
                             </div>
                         </div>
 
