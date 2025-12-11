@@ -77,9 +77,15 @@ class LLMClient:
                 "anthropic package not installed. Run: pip install anthropic"
             )
 
+        import httpx
+        # Create custom httpx client with appropriate timeouts for serverless
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(60.0, connect=30.0),
+            follow_redirects=True,
+        )
         self.client = anthropic.Anthropic(
             api_key=self.api_key,
-            timeout=60.0,  # 60 second timeout for serverless environments
+            http_client=http_client,
         )
 
     def rewrite_with_markers(
