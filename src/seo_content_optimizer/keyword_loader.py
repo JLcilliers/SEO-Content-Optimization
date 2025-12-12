@@ -23,7 +23,8 @@ class KeywordLoadError(Exception):
 KEYWORD_COLUMN_VARIANTS = ["keyword", "keywords", "term", "terms", "query", "queries", "phrase"]
 VOLUME_COLUMN_VARIANTS = ["search_volume", "volume", "searchvolume", "sv", "avg_monthly_searches"]
 DIFFICULTY_COLUMN_VARIANTS = ["difficulty", "kd", "keyword_difficulty", "seo_difficulty", "competition"]
-INTENT_COLUMN_VARIANTS = ["intent", "search_intent", "type", "keyword_intent"]
+INTENT_COLUMN_VARIANTS = ["intent", "search_intent", "keyword_intent"]
+BRAND_COLUMN_VARIANTS = ["is_brand", "brand", "branded", "type"]  # "type" can be "brand" or "topic"
 
 
 def _normalize_column_name(name: str) -> str:
@@ -142,6 +143,7 @@ def _parse_keyword_dataframe(df: pd.DataFrame) -> list[Keyword]:
     volume_col = _find_column(df, VOLUME_COLUMN_VARIANTS)
     difficulty_col = _find_column(df, DIFFICULTY_COLUMN_VARIANTS)
     intent_col = _find_column(df, INTENT_COLUMN_VARIANTS)
+    brand_col = _find_column(df, BRAND_COLUMN_VARIANTS)
 
     keywords: list[Keyword] = []
 
@@ -184,12 +186,23 @@ def _parse_keyword_dataframe(df: pd.DataFrame) -> list[Keyword]:
             else:
                 intent = intent_value
 
+        # Parse is_brand flag from column
+        is_brand: bool = False
+        if brand_col and not pd.isna(row[brand_col]):
+            brand_value = str(row[brand_col]).strip().lower()
+            # Support various formats: true/false, yes/no, 1/0, brand/topic
+            if brand_value in ("true", "yes", "1", "brand", "branded", "y"):
+                is_brand = True
+            elif brand_value in ("false", "no", "0", "topic", "n"):
+                is_brand = False
+
         keywords.append(
             Keyword(
                 phrase=phrase,
                 search_volume=search_volume,
                 difficulty=difficulty,
                 intent=intent,
+                is_brand=is_brand,
             )
         )
 

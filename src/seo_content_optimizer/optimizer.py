@@ -25,6 +25,7 @@ from .llm_client import (
     ADD_START,
     LLMClient,
     create_llm_client,
+    ensure_contains_phrase,
     ensure_markers_present,
     strip_markers,
 )
@@ -34,6 +35,7 @@ from .models import (
     HeadingLevel,
     Keyword,
     KeywordPlan,
+    ManualKeywordsConfig,
     MetaElement,
     OptimizationResult,
     PageMeta,
@@ -73,6 +75,7 @@ class ContentOptimizer:
         self,
         content: Union[PageMeta, DocxContent],
         keywords: list[Keyword],
+        manual_keywords: Optional[ManualKeywordsConfig] = None,
         generate_faq: bool = True,
         faq_count: int = 4,
         max_secondary: int = 5,
@@ -82,7 +85,10 @@ class ContentOptimizer:
 
         Args:
             content: Content to optimize (from URL or DOCX).
-            keywords: List of available keywords.
+            keywords: List of available keywords (used only if manual_keywords is None).
+            manual_keywords: Manual keyword selection config. If provided, bypasses
+                            automatic keyword selection and uses user-specified keywords
+                            directly without filtering or scoring.
             generate_faq: Whether to generate FAQ section.
             faq_count: Number of FAQ items to generate.
             max_secondary: Maximum secondary keywords.
@@ -96,46 +102,56 @@ class ContentOptimizer:
         else:
             full_text = content.full_text
 
-        # Step 0.5: Filter keywords for topical relevance BEFORE any optimization
-        # This is CRITICAL to prevent injection of off-topic industries/verticals
-        filtered_keywords, filter_results = filter_keywords_for_content(
-            keywords=keywords,
-            content_text=full_text,
-            min_overlap=0.5,  # Require 50% token overlap for non-exact matches
-        )
-
-        # Log filter results for debugging
-        filter_summary = log_filter_results(filter_results, verbose=False)
-        self._filter_summary = filter_summary
-
-        # Log rejected keywords for debugging (in verbose mode this could be exposed)
-        rejected = [r for r in filter_results if not r.is_allowed]
-        if rejected:
-            # Store rejection info for potential debugging
-            self._rejected_keywords = rejected
-
-        # If no keywords passed the filter, use a relaxed filter
-        # BUT NEVER allow blocked terms through even with relaxed filter
-        if not filtered_keywords:
-            # Try again with lower threshold but same blocklist
-            filtered_keywords, _ = filter_keywords_for_content(
+        # Check if we're using manual keyword mode
+        if manual_keywords is not None:
+            # MANUAL KEYWORD MODE: Bypass all filtering and auto-selection
+            # User-specified keywords are used directly without any modification
+            keyword_plan = self._build_keyword_plan_from_manual(manual_keywords)
+            filtered_keywords = keyword_plan.all_keywords
+            self._filter_summary = "Manual keyword mode: user-specified keywords used directly"
+            self._rejected_keywords = []
+        else:
+            # AUTOMATIC MODE: Filter and select keywords as before
+            # Step 0.5: Filter keywords for topical relevance BEFORE any optimization
+            # This is CRITICAL to prevent injection of off-topic industries/verticals
+            filtered_keywords, filter_results = filter_keywords_for_content(
                 keywords=keywords,
                 content_text=full_text,
-                min_overlap=0.3,  # More relaxed but blocklist still applies
+                min_overlap=0.5,  # Require 50% token overlap for non-exact matches
             )
 
-        # If still no keywords, fall back to generic keywords that don't have blocked terms
-        # NEVER use original list unfiltered
-        if not filtered_keywords:
-            # Only take keywords that don't contain blocked terms
-            safe_keywords = []
-            from .keyword_filter import contains_blocked_term
-            for kw in keywords:
-                if not contains_blocked_term(kw.phrase, full_text):
-                    safe_keywords.append(kw)
-                if len(safe_keywords) >= 10:
-                    break
-            filtered_keywords = safe_keywords
+            # Log filter results for debugging
+            filter_summary = log_filter_results(filter_results, verbose=False)
+            self._filter_summary = filter_summary
+
+            # Log rejected keywords for debugging (in verbose mode this could be exposed)
+            rejected = [r for r in filter_results if not r.is_allowed]
+            if rejected:
+                # Store rejection info for potential debugging
+                self._rejected_keywords = rejected
+
+            # If no keywords passed the filter, use a relaxed filter
+            # BUT NEVER allow blocked terms through even with relaxed filter
+            if not filtered_keywords:
+                # Try again with lower threshold but same blocklist
+                filtered_keywords, _ = filter_keywords_for_content(
+                    keywords=keywords,
+                    content_text=full_text,
+                    min_overlap=0.3,  # More relaxed but blocklist still applies
+                )
+
+            # If still no keywords, fall back to generic keywords that don't have blocked terms
+            # NEVER use original list unfiltered
+            if not filtered_keywords:
+                # Only take keywords that don't contain blocked terms
+                safe_keywords = []
+                from .keyword_filter import contains_blocked_term
+                for kw in keywords:
+                    if not contains_blocked_term(kw.phrase, full_text):
+                        safe_keywords.append(kw)
+                    if len(safe_keywords) >= 10:
+                        break
+                filtered_keywords = safe_keywords
 
         # Extract content topics for LLM context
         content_topics = get_content_topics(full_text, top_n=15)
@@ -152,14 +168,15 @@ class ContentOptimizer:
         # Step 1: Analyze content (with filtered keywords)
         analysis = analyze_content(content, filtered_keywords)
 
-        # Step 2: Create keyword plan (with filtered keywords)
-        keyword_plan = create_keyword_plan(
-            keywords=filtered_keywords,
-            content=content,
-            analysis=analysis,
-            max_secondary=max_secondary,
-            max_questions=faq_count,
-        )
+        # Step 2: Create keyword plan (skip if using manual keywords)
+        if manual_keywords is None:
+            keyword_plan = create_keyword_plan(
+                keywords=filtered_keywords,
+                content=content,
+                analysis=analysis,
+                max_secondary=max_secondary,
+                max_questions=faq_count,
+            )
 
         # Store content topics for use in LLM calls
         self._content_topics = content_topics
@@ -201,12 +218,59 @@ class ContentOptimizer:
                 num_items=faq_count,
             )
 
+        # Step 7: GUARANTEE all keywords appear in content (especially for manual mode)
+        # Check which keywords are missing from the body content
+        optimized_blocks = self._ensure_all_keywords_present(
+            blocks=optimized_blocks,
+            keyword_plan=keyword_plan,
+            topic=analysis.topic,
+        )
+
         return OptimizationResult(
             meta_elements=meta_elements,
             optimized_blocks=optimized_blocks,
             faq_items=faq_items,
             primary_keyword=keyword_plan.primary.phrase,
             secondary_keywords=[kw.phrase for kw in keyword_plan.secondary],
+        )
+
+    def _build_keyword_plan_from_manual(
+        self,
+        manual_keywords: ManualKeywordsConfig,
+    ) -> KeywordPlan:
+        """
+        Build a KeywordPlan directly from manual keyword configuration.
+
+        This bypasses all automatic keyword selection, filtering, and scoring.
+        User-specified keywords are used exactly as provided.
+
+        Args:
+            manual_keywords: The manual keyword configuration from user input.
+
+        Returns:
+            KeywordPlan with user-specified keywords.
+        """
+        # Create primary keyword - never marked as brand, no filtering
+        primary = Keyword(
+            phrase=manual_keywords.primary.strip(),
+            is_brand=False,  # Manual keywords are never treated as brand
+        )
+
+        # Create secondary keywords from user-provided list
+        secondary = [
+            Keyword(
+                phrase=phrase.strip(),
+                is_brand=False,  # Manual keywords are never treated as brand
+            )
+            for phrase in manual_keywords.secondary
+            if phrase and phrase.strip()
+        ]
+
+        # Return the keyword plan (no long_tail_questions in manual mode)
+        return KeywordPlan(
+            primary=primary,
+            secondary=secondary,
+            long_tail_questions=[],  # FAQ questions generated from topic in manual mode
         )
 
     def _optimize_meta_elements(
@@ -234,6 +298,10 @@ class ContentOptimizer:
             optimized=optimized_title,
             element_type="title",
         )
+        # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in title
+        optimized_title = ensure_contains_phrase(
+            optimized_title, primary, fallback_position="start"
+        )
         meta_elements.append(
             MetaElement(
                 element_name="Title Tag",
@@ -255,6 +323,10 @@ class ContentOptimizer:
             original=current_meta_desc or "",
             optimized=optimized_desc,
             element_type="meta_description",
+        )
+        # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in meta description
+        optimized_desc = ensure_contains_phrase(
+            optimized_desc, primary, fallback_position="start"
         )
         meta_elements.append(
             MetaElement(
@@ -278,6 +350,10 @@ class ContentOptimizer:
             original=current_h1 or "",
             optimized=optimized_h1,
             element_type="h1",
+        )
+        # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in H1
+        optimized_h1 = ensure_contains_phrase(
+            optimized_h1, primary, fallback_position="start"
         )
         meta_elements.append(
             MetaElement(
@@ -439,6 +515,124 @@ Return ONLY the optimized heading."""
         except Exception:
             # On error, return original
             return text
+
+    def _ensure_all_keywords_present(
+        self,
+        blocks: list[ParagraphBlock],
+        keyword_plan: KeywordPlan,
+        topic: str,
+    ) -> list[ParagraphBlock]:
+        """
+        Ensure ALL keywords from the keyword plan appear in the content.
+
+        This is the final safety net - if any keyword was missed by the LLM
+        during optimization, we add a fallback sentence containing it.
+
+        Args:
+            blocks: The optimized content blocks.
+            keyword_plan: The keyword plan with primary and secondary keywords.
+            topic: The content topic for context.
+
+        Returns:
+            Updated blocks with any missing keywords added.
+        """
+        # Collect all content text
+        all_text = " ".join(strip_markers(block.text) for block in blocks).lower()
+
+        # Find missing keywords
+        missing_keywords = []
+
+        # Check primary keyword
+        if keyword_plan.primary.phrase.lower() not in all_text:
+            missing_keywords.append(keyword_plan.primary.phrase)
+
+        # Check secondary keywords
+        for kw in keyword_plan.secondary:
+            if kw.phrase.lower() not in all_text:
+                missing_keywords.append(kw.phrase)
+
+        # If no keywords are missing, return unchanged
+        if not missing_keywords:
+            return blocks
+
+        # Generate fallback sentences for missing keywords
+        fallback_sentences = self._generate_keyword_fallback_sentences(
+            missing_keywords=missing_keywords,
+            topic=topic,
+        )
+
+        # Add fallback paragraph at the end of the content
+        if fallback_sentences:
+            fallback_text = " ".join(fallback_sentences)
+            # Wrap entire fallback in markers since it's all new content
+            marked_fallback = f"{ADD_START}{fallback_text}{ADD_END}"
+            blocks.append(
+                ParagraphBlock(
+                    text=marked_fallback,
+                    heading_level=HeadingLevel.BODY,
+                )
+            )
+
+        return blocks
+
+    def _generate_keyword_fallback_sentences(
+        self,
+        missing_keywords: list[str],
+        topic: str,
+    ) -> list[str]:
+        """
+        Generate natural-sounding sentences that include missing keywords.
+
+        Args:
+            missing_keywords: Keywords that need to be added.
+            topic: The content topic for context.
+
+        Returns:
+            List of sentences, each containing at least one keyword.
+        """
+        if not missing_keywords:
+            return []
+
+        # Use LLM to generate natural sentences containing the keywords
+        prompt = f"""Generate 1-2 short, natural sentences about "{topic}" that include these EXACT keyword phrases:
+
+Keywords to include: {", ".join(missing_keywords)}
+
+CRITICAL REQUIREMENTS:
+1. Each keyword phrase must appear EXACTLY as written (not paraphrased)
+2. Sentences must sound natural and informative
+3. Keep each sentence under 30 words
+4. Do NOT use bullet points or numbered lists
+5. Return only the sentences, nothing else
+
+Example output format:
+Understanding [keyword1] is essential for [topic]. Many businesses benefit from [keyword2] solutions."""
+
+        try:
+            response = self.llm.client.messages.create(
+                model=self.llm.model,
+                max_tokens=200,
+                system="You are a content writer. Generate natural sentences that include specific keyword phrases exactly as provided.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = response.content[0].text.strip()
+
+            # Split into sentences and filter
+            sentences = []
+            for sentence in result.replace("\n", " ").split(". "):
+                sentence = sentence.strip()
+                if sentence and not sentence.startswith("-") and not sentence[0].isdigit():
+                    if not sentence.endswith("."):
+                        sentence += "."
+                    sentences.append(sentence)
+
+            return sentences
+        except Exception:
+            # Fallback: create simple sentences manually
+            sentences = []
+            for kw in missing_keywords:
+                sentences.append(f"Learn more about {kw} and how it relates to {topic}.")
+            return sentences
 
     def _generate_faq(
         self,

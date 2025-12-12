@@ -35,13 +35,19 @@ CRITICAL RULES - MUST FOLLOW:
 5. Do not invent facts or make claims not supported by the original content
 6. Keep sentences natural and readable - avoid keyword stuffing
 
+KEYWORD PHRASE INTEGRITY - ESSENTIAL:
+7. Use keywords as COMPLETE PHRASES - never break them into separate words
+8. "payment processing solutions" = use this exact 3-word phrase together
+9. Long-tail keywords must appear as one unbroken phrase in a single location
+10. NEVER scatter individual words from a keyword phrase across different sentences
+
 STRICT TOPICAL CONSTRAINTS - VIOLATIONS WILL BE REJECTED:
-7. NEVER introduce industries, verticals, or business types not already in the original content
-8. NEVER add mentions of: cannabis, hemp, CBD, gambling, adult content, firearms, or other high-risk industries unless they are explicitly in the original
-9. NEVER claim the company "specializes in" or "serves" industries not mentioned in the original
-10. ONLY use keywords that directly relate to what the page is actually about
-11. Do not stuff the company/brand name repeatedly - keep brand mentions reasonable and natural
-12. If a keyword doesn't fit the page topic, DO NOT force it in - skip it entirely
+11. NEVER introduce industries, verticals, or business types not already in the original content
+12. NEVER add mentions of: cannabis, hemp, CBD, gambling, adult content, firearms, or other high-risk industries unless they are explicitly in the original
+13. NEVER claim the company "specializes in" or "serves" industries not mentioned in the original
+14. ONLY use keywords that directly relate to what the page is actually about
+15. Do not stuff the company/brand name repeatedly - keep brand mentions reasonable and natural
+16. If a keyword doesn't fit the page topic, DO NOT force it in - skip it entirely
 
 MARKER FORMAT:
 - Wrap only the NEW or CHANGED portions with markers
@@ -474,6 +480,12 @@ INSTRUCTIONS:
 6. Keep the same paragraph structure
 7. Do not be repetitive or stuffed - maintain natural reading flow
 
+CRITICAL PHRASE USAGE RULES:
+8. Use each keyword as a COMPLETE PHRASE - never split it into individual words
+9. "credit card processing" means the FULL phrase, not "credit" and "card" and "processing" separately
+10. Long-tail keywords like "best payment processor for small business" must appear as one complete phrase
+11. Do NOT scatter keyword words throughout unrelated sentences - use the full phrase in one place
+
 ABSOLUTE RESTRICTIONS - VIOLATIONS WILL BE REJECTED:
 - ONLY use keywords from the EXACT list provided above - no other keywords allowed
 - NEVER introduce industries, verticals, or business types not in the original content
@@ -600,3 +612,54 @@ def ensure_markers_present(
 def has_markers(text: str) -> bool:
     """Check if text contains any ADD markers."""
     return ADD_START in text or ADD_END in text
+
+
+def ensure_contains_phrase(
+    text: str,
+    phrase: str,
+    fallback_position: str = "start",
+) -> str:
+    """
+    Ensure the text contains the exact keyword phrase.
+
+    If the phrase is not present (case-insensitive), inject it at the specified
+    position with ADD markers. This is a programmatic guarantee for critical
+    keywords like the primary keyword in Title, Meta Description, and H1.
+
+    Args:
+        text: The text to check/modify.
+        phrase: The keyword phrase that must be present.
+        fallback_position: Where to inject if missing - "start" or "end".
+
+    Returns:
+        Text guaranteed to contain the phrase.
+    """
+    if not text or not phrase:
+        return text
+
+    # Clean the text of markers for checking
+    clean_text = strip_markers(text)
+
+    # Case-insensitive check for phrase presence
+    if phrase.lower() in clean_text.lower():
+        return text  # Phrase already present, no modification needed
+
+    # Phrase is missing - inject it with markers
+    injection = f"{ADD_START}{phrase}{ADD_END}"
+
+    if fallback_position == "start":
+        # Prepend phrase followed by separator
+        if has_markers(text):
+            # Already has markers, just prepend
+            return f"{injection}: {text}"
+        else:
+            # No markers, wrap the modified result
+            return f"{injection}: {text}"
+    else:
+        # Append phrase with separator
+        if text.endswith("."):
+            return f"{text[:-1]} - {injection}."
+        elif text.endswith(":") or text.endswith("|"):
+            return f"{text} {injection}"
+        else:
+            return f"{text} | {injection}"

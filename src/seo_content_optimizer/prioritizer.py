@@ -172,18 +172,34 @@ class KeywordPrioritizer:
         """
         Select the best primary keyword.
 
+        IMPORTANT: The primary keyword MUST be a topic keyword, NOT a brand keyword.
+        Brand keywords (is_brand=True) are excluded from primary selection.
+
         Prioritizes:
-        1. Relevance (already filtered)
-        2. Search volume
-        3. Lower difficulty
-        4. Already present in content (continuity)
+        1. Non-brand keywords only (is_brand=False)
+        2. Relevance (already filtered)
+        3. Search volume
+        4. Lower difficulty
+        5. Already present in content (continuity)
         """
         if not candidates:
             raise ValueError("No candidate keywords available")
 
+        # CRITICAL: Filter out brand keywords - primary must be a topic keyword
+        non_brand_candidates = [kw for kw in candidates if not kw.is_brand]
+
+        # If all candidates are brands, log warning and use all candidates as fallback
+        if not non_brand_candidates:
+            import logging
+            logging.warning(
+                "All keyword candidates are branded. Falling back to full candidate list. "
+                "Consider adding topic keywords to your keyword list."
+            )
+            non_brand_candidates = candidates
+
         scored = []
 
-        for kw in candidates:
+        for kw in non_brand_candidates:
             score = 0.0
 
             # Volume score
@@ -226,6 +242,8 @@ class KeywordPrioritizer:
         - Variants/synonyms of primary
         - Related supporting topics
         - Long-tail variations
+
+        Note: Brand keywords are deprioritized but not excluded from secondary.
         """
         if not candidates:
             return []
@@ -259,6 +277,10 @@ class KeywordPrioritizer:
             # Length bonus for long-tail
             if len(kw.phrase.split()) >= 3:
                 score += 15
+
+            # Deprioritize brand keywords for secondary (prefer topic keywords)
+            if kw.is_brand:
+                score -= 25
 
             scored.append((kw, score))
 

@@ -27,7 +27,7 @@ from seo_content_optimizer.keyword_loader import load_keywords
 from seo_content_optimizer.optimizer import ContentOptimizer
 from seo_content_optimizer.docx_writer import DocxWriter
 from seo_content_optimizer.filename_generator import suggest_filename_for_download
-from seo_content_optimizer.models import Keyword
+from seo_content_optimizer.models import Keyword, ManualKeywordsConfig
 
 app = FastAPI(
     title="SEO Content Optimizer API",
@@ -53,10 +53,21 @@ class KeywordInput(BaseModel):
     intent: Optional[str] = None
 
 
+class ManualKeywordsInput(BaseModel):
+    """Manual keyword selection input.
+
+    When provided, bypasses automatic keyword selection and uses
+    user-specified keywords directly without filtering or scoring.
+    """
+    primary: str = Field(..., description="Required primary keyword phrase")
+    secondary: list[str] = Field(default_factory=list, description="Up to 3 secondary keyword phrases")
+
+
 class OptimizeURLRequest(BaseModel):
     """Request model for URL-based optimization."""
     source_url: str = Field(..., description="URL to fetch content from")
-    keywords: list[KeywordInput] = Field(..., description="List of keywords to optimize for")
+    keywords: list[KeywordInput] = Field(default_factory=list, description="List of keywords to optimize for")
+    manual_keywords: Optional[ManualKeywordsInput] = Field(None, description="Manual keyword selection (bypasses auto-selection)")
     generate_faq: bool = Field(True, description="Whether to generate FAQ section")
     faq_count: int = Field(4, description="Number of FAQ items to generate")
     max_secondary: int = Field(5, description="Maximum secondary keywords to use")
@@ -173,11 +184,20 @@ async def optimize_from_url(request: OptimizeURLRequest):
             for kw in request.keywords
         ]
 
+        # Convert manual keywords if provided
+        manual_keywords_config = None
+        if request.manual_keywords:
+            manual_keywords_config = ManualKeywordsConfig(
+                primary=request.manual_keywords.primary,
+                secondary=request.manual_keywords.secondary,
+            )
+
         # Run optimization
         optimizer = ContentOptimizer(api_key=api_key)
         result = optimizer.optimize(
             content=content,
             keywords=keywords,
+            manual_keywords=manual_keywords_config,
             generate_faq=request.generate_faq,
             faq_count=request.faq_count,
             max_secondary=request.max_secondary,

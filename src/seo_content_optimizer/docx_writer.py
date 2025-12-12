@@ -265,6 +265,12 @@ class DocxWriter:
         # Add reading guide
         self._add_reading_guide()
 
+        # Add keyword plan table
+        self._add_keyword_plan_table(
+            primary_keyword=result.primary_keyword,
+            secondary_keywords=result.secondary_keywords,
+        )
+
         # Add meta elements table
         self._add_meta_table(result.meta_elements)
 
@@ -302,6 +308,68 @@ class DocxWriter:
         add_marked_text(guide_para, guide_text)
 
         # Add spacing
+        self.doc.add_paragraph()
+
+    def _add_keyword_plan_table(
+        self,
+        primary_keyword: Optional[str],
+        secondary_keywords: Optional[list[str]],
+    ) -> None:
+        """Add the Keyword Plan table showing selected keywords.
+
+        This table displays the primary keyword and secondary keywords
+        that were used for optimization, providing transparency about
+        the keyword strategy.
+
+        Args:
+            primary_keyword: The primary keyword used for optimization.
+            secondary_keywords: List of secondary keywords used.
+        """
+        # Add section header
+        self.doc.add_heading("Keyword Plan", level=2)
+
+        # Create table with 2 columns: Type and Keyword
+        table = self.doc.add_table(rows=1, cols=2)
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.LEFT
+
+        # Set column widths
+        widths = [Inches(1.5), Inches(4.5)]
+        for i, width in enumerate(widths):
+            table.columns[i].width = width
+
+        # Add header row
+        header_cells = table.rows[0].cells
+        headers = ["Type", "Keyword"]
+        for i, header in enumerate(headers):
+            header_cells[i].text = header
+            # Bold header text
+            for paragraph in header_cells[i].paragraphs:
+                for run in paragraph.runs:
+                    run.font.bold = True
+            # Gray background for header
+            set_cell_shading(header_cells[i], "D9D9D9")
+
+        # Add primary keyword row
+        if primary_keyword:
+            row = table.add_row()
+            cells = row.cells
+            cells[0].text = "Primary"
+            # Bold the "Primary" label
+            for paragraph in cells[0].paragraphs:
+                for run in paragraph.runs:
+                    run.font.bold = True
+            cells[1].text = primary_keyword
+
+        # Add secondary keyword rows
+        if secondary_keywords:
+            for i, secondary in enumerate(secondary_keywords):
+                row = table.add_row()
+                cells = row.cells
+                cells[0].text = f"Secondary {i + 1}"
+                cells[1].text = secondary
+
+        # Add spacing after table
         self.doc.add_paragraph()
 
     def _add_meta_table(self, meta_elements: list[MetaElement]) -> None:

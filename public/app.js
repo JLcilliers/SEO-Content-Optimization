@@ -15,6 +15,7 @@ const fileSource = document.getElementById('file-source');
 
 // Keywords toggle buttons
 const keywordsToggleBtns = document.querySelectorAll('.toggle-btn[data-keywords]');
+const keywordsManualSource = document.getElementById('keywords-manual-source');
 const keywordsTextSource = document.getElementById('keywords-text-source');
 const keywordsFileSource = document.getElementById('keywords-file-source');
 
@@ -66,11 +67,15 @@ keywordsToggleBtns.forEach(btn => {
         btn.classList.add('active');
 
         // Update keywords input visibility
-        if (keywordsType === 'text') {
+        keywordsManualSource.classList.remove('active');
+        keywordsTextSource.classList.remove('active');
+        keywordsFileSource.classList.remove('active');
+
+        if (keywordsType === 'manual') {
+            keywordsManualSource.classList.add('active');
+        } else if (keywordsType === 'text') {
             keywordsTextSource.classList.add('active');
-            keywordsFileSource.classList.remove('active');
         } else {
-            keywordsTextSource.classList.remove('active');
             keywordsFileSource.classList.add('active');
         }
 
@@ -140,6 +145,23 @@ function parseKeywords(text) {
     });
 }
 
+// Get manual keywords from form
+function getManualKeywords() {
+    const primary = document.getElementById('manual-primary').value.trim();
+    const secondary1 = document.getElementById('manual-secondary-1').value.trim();
+    const secondary2 = document.getElementById('manual-secondary-2').value.trim();
+    const secondary3 = document.getElementById('manual-secondary-3').value.trim();
+
+    if (!primary) {
+        throw new Error('Please enter a primary keyword');
+    }
+
+    return {
+        primary: primary,
+        secondary: [secondary1, secondary2, secondary3].filter(s => s.length > 0)
+    };
+}
+
 // Unified form submission
 optimizerForm.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -154,8 +176,18 @@ optimizerForm.addEventListener('submit', async (e) => {
     hideResults();
 
     try {
+        // Handle manual keyword mode
+        if (currentKeywordsType === 'manual') {
+            const manualKeywords = getManualKeywords();
+
+            if (currentSourceType === 'url') {
+                await optimizeFromUrlWithManualKeywords(manualKeywords, faqCount, maxSecondary);
+            } else {
+                throw new Error('Manual keyword mode currently only supports URL content source');
+            }
+        }
         // Determine if we're using file upload for keywords
-        if (currentKeywordsType === 'file') {
+        else if (currentKeywordsType === 'file') {
             // File-based keywords - must use file endpoint
             await optimizeWithKeywordsFile(faqCount, maxSecondary);
         } else {
@@ -197,6 +229,43 @@ async function optimizeFromUrl(keywords, faqCount, maxSecondary) {
         body: JSON.stringify({
             source_url: sourceUrl,
             keywords: keywords,
+            generate_faq: faqCount > 0,
+            faq_count: faqCount,
+            max_secondary: maxSecondary
+        })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(data.detail || 'Failed to optimize content');
+    }
+
+    // Store document for download
+    currentDocumentBase64 = data.document_base64;
+    currentFileName = `optimized-${new URL(sourceUrl).hostname}.docx`;
+
+    // Display results
+    displayResults(data);
+}
+
+// Optimize from URL with manual keywords (bypasses auto-selection)
+async function optimizeFromUrlWithManualKeywords(manualKeywords, faqCount, maxSecondary) {
+    const sourceUrl = document.getElementById('source-url').value;
+
+    if (!sourceUrl) {
+        throw new Error('Please enter a URL');
+    }
+
+    const response = await fetch(`${API_BASE}/api/optimize/url`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            source_url: sourceUrl,
+            keywords: [],  // Empty - using manual mode
+            manual_keywords: manualKeywords,  // Pass manual keywords
             generate_faq: faqCount > 0,
             faq_count: faqCount,
             max_secondary: maxSecondary

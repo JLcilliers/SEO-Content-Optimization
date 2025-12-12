@@ -357,3 +357,149 @@ def find_underused_keywords(
             underused.append(kw)
 
     return underused
+
+
+# =============================================================================
+# Brand Detection Heuristics
+# =============================================================================
+
+def guess_brand_tokens(
+    url: Optional[str] = None,
+    h1: Optional[str] = None,
+    title: Optional[str] = None,
+) -> set[str]:
+    """
+    Extract likely brand name tokens from URL domain, H1, and title.
+
+    This heuristic identifies potential brand names by:
+    1. Extracting domain name from URL (e.g., "payzli" from "payzli.com")
+    2. Extracting capitalized proper nouns from H1/title
+    3. Looking for common brand patterns like "CompanyName vs/vs."
+
+    Args:
+        url: The page URL (optional).
+        h1: The H1 heading text (optional).
+        title: The page title (optional).
+
+    Returns:
+        Set of lowercase brand token candidates.
+    """
+    brand_tokens: set[str] = set()
+
+    # 1. Extract from URL domain
+    if url:
+        # Handle URLs with or without protocol
+        domain_match = re.search(r"(?:https?://)?(?:www\.)?([a-zA-Z0-9-]+)\.", url)
+        if domain_match:
+            domain = domain_match.group(1).lower()
+            # Skip generic domains
+            if domain not in {"blog", "www", "shop", "store", "app", "my", "get"}:
+                brand_tokens.add(domain)
+
+    # 2. Extract capitalized words from H1 and title (likely proper nouns/brands)
+    for text in [h1, title]:
+        if not text:
+            continue
+
+        # Find capitalized words that could be brand names
+        # Match words starting with capital letter, possibly with numbers
+        cap_words = re.findall(r"\b([A-Z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]*)*)\b", text)
+        for word in cap_words:
+            word_lower = word.lower()
+            # Skip common non-brand words that are often capitalized
+            skip_words = {
+                "the", "a", "an", "and", "or", "but", "for", "to", "of", "in", "on",
+                "with", "by", "is", "are", "was", "were", "be", "been", "have", "has",
+                "how", "what", "why", "when", "where", "which", "who", "your", "our",
+                "best", "top", "guide", "review", "reviews", "complete", "ultimate",
+                "new", "vs", "versus", "comparison", "compared", "alternatives",
+            }
+            if word_lower not in skip_words and len(word) >= 2:
+                brand_tokens.add(word_lower)
+
+    # 3. Look for "X vs Y" patterns which often contain brand names
+    combined_text = f"{h1 or ''} {title or ''}".lower()
+    vs_match = re.search(r"(\w+)\s+(?:vs\.?|versus)\s+(\w+)", combined_text, re.IGNORECASE)
+    if vs_match:
+        for group in vs_match.groups():
+            if group and len(group) >= 2:
+                brand_tokens.add(group.lower())
+
+    return brand_tokens
+
+
+def is_branded_phrase(
+    phrase: str,
+    brand_tokens: set[str],
+    keyword: Optional[Keyword] = None,
+) -> bool:
+    """
+    Check if a keyword phrase is a brand/navigational keyword.
+
+    A phrase is considered branded if:
+    1. The keyword has is_brand=True flag set (explicit from CSV/Excel)
+    2. Any token in the phrase matches a known brand token
+    3. The keyword has navigational intent
+
+    Args:
+        phrase: The keyword phrase to check.
+        brand_tokens: Set of known brand tokens (from guess_brand_tokens).
+        keyword: Optional Keyword object (to check is_brand flag and intent).
+
+    Returns:
+        True if the phrase is branded, False otherwise.
+    """
+    # Check explicit is_brand flag from CSV/Excel
+    if keyword and keyword.is_brand:
+        return True
+
+    # Check for navigational intent (often brand-related)
+    if keyword and keyword.intent and keyword.intent.lower() == "navigational":
+        return True
+
+    # Tokenize the phrase
+    phrase_lower = phrase.lower()
+    phrase_tokens = set(re.findall(r"[a-zA-Z0-9]+", phrase_lower))
+
+    # Check if any phrase token matches a brand token
+    overlap = phrase_tokens & brand_tokens
+    if overlap:
+        return True
+
+    return False
+
+
+def mark_branded_keywords(
+    keywords: list[Keyword],
+    url: Optional[str] = None,
+    h1: Optional[str] = None,
+    title: Optional[str] = None,
+) -> list[Keyword]:
+    """
+    Update keywords with is_brand=True if they match detected brand patterns.
+
+    This function applies heuristic brand detection to keywords that don't
+    already have is_brand explicitly set. Keywords already marked as brands
+    are left unchanged.
+
+    Args:
+        keywords: List of keywords to process.
+        url: The page URL for brand detection.
+        h1: The H1 heading text for brand detection.
+        title: The page title for brand detection.
+
+    Returns:
+        The same list of keywords with is_brand flags updated.
+    """
+    brand_tokens = guess_brand_tokens(url=url, h1=h1, title=title)
+
+    for kw in keywords:
+        # Skip keywords already marked as brands
+        if kw.is_brand:
+            continue
+
+        # Apply heuristic detection
+        if is_branded_phrase(kw.phrase, brand_tokens, kw):
+            kw.is_brand = True
+
+    return keywords

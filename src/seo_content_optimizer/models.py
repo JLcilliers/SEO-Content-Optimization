@@ -35,6 +35,7 @@ class Keyword:
     search_volume: Optional[int] = None
     difficulty: Optional[float] = None
     intent: Optional[str] = None
+    is_brand: bool = False  # True if this is a brand/navigational keyword
 
     def __post_init__(self) -> None:
         """Normalize the keyword phrase."""
@@ -200,6 +201,17 @@ class DocxContent:
     def headings(self) -> list[ParagraphBlock]:
         """Get all headings."""
         return [p for p in self.paragraphs if p.is_heading]
+
+
+@dataclass
+class ManualKeywordsConfig:
+    """Manual keyword selection configuration.
+
+    When provided, bypasses automatic keyword selection and uses
+    user-specified keywords directly without filtering or scoring.
+    """
+    primary: str  # Required primary keyword phrase
+    secondary: list[str] = field(default_factory=list)  # Up to 3 secondary keyword phrases
 
 
 @dataclass

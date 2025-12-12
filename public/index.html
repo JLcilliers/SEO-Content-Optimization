@@ -49,7 +49,14 @@
                             </h3>
 
                             <!-- Keywords Source Toggle -->
-                            <div class="source-toggle">
+                            <div class="source-toggle three-options">
+                                <button type="button" class="toggle-btn" data-keywords="manual">
+                                    <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="10"/>
+                                        <path d="M9 12l2 2 4-4"/>
+                                    </svg>
+                                    Manual (4 Keywords)
+                                </button>
                                 <button type="button" class="toggle-btn active" data-keywords="text">
                                     <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -67,6 +74,52 @@
                                     </svg>
                                     Upload Excel/CSV
                                 </button>
+                            </div>
+
+                            <!-- Manual Keywords Input (4 specific fields) -->
+                            <div id="keywords-manual-source" class="keywords-input">
+                                <div class="manual-keywords-grid">
+                                    <div class="form-group primary-keyword">
+                                        <label for="manual-primary">Primary Keyword <span class="required">*</span></label>
+                                        <input
+                                            type="text"
+                                            id="manual-primary"
+                                            placeholder="e.g., payment processing solutions"
+                                            class="keyword-input primary"
+                                        >
+                                        <span class="helper-text">Main keyword - guaranteed in Title, Meta, and H1</span>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="manual-secondary-1">Secondary Keyword 1</label>
+                                        <input
+                                            type="text"
+                                            id="manual-secondary-1"
+                                            placeholder="e.g., merchant services"
+                                            class="keyword-input secondary"
+                                        >
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="manual-secondary-2">Secondary Keyword 2</label>
+                                        <input
+                                            type="text"
+                                            id="manual-secondary-2"
+                                            placeholder="e.g., credit card processing"
+                                            class="keyword-input secondary"
+                                        >
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="manual-secondary-3">Secondary Keyword 3</label>
+                                        <input
+                                            type="text"
+                                            id="manual-secondary-3"
+                                            placeholder="e.g., online payment gateway"
+                                            class="keyword-input secondary"
+                                        >
+                                    </div>
+                                </div>
+                                <span class="helper-text manual-mode-info">
+                                    <strong>Manual Mode:</strong> Your exact keywords will be used without filtering. All keywords are guaranteed to appear in the final content.
+                                </span>
                             </div>
 
                             <!-- Text Input for Keywords -->
