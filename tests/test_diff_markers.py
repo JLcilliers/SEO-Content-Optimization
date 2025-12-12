@@ -21,10 +21,13 @@ from seo_content_optimizer.diff_markers import (
     add_markers_by_diff,
     split_into_sentences,
     strip_markers,
+    mark_block_as_new,
+    normalize_token_for_diff,
     expand_markers_to_full_sentence,
     compute_markers,
     cleanup_markers,
     inject_phrase_with_markers,
+    filter_markers_by_keywords,
 )
 
 
@@ -170,6 +173,121 @@ class TestStripMarkers:
         text = "Hello world!"
         result = strip_markers(text)
         assert result == text
+
+
+class TestMarkBlockAsNew:
+    """Tests for the mark_block_as_new function."""
+
+    def test_wraps_text_in_markers(self):
+        """Plain text is wrapped in markers."""
+        text = "This is a new FAQ answer."
+        result = mark_block_as_new(text)
+        assert result == f"{MARK_START}This is a new FAQ answer.{MARK_END}"
+
+    def test_empty_string_returns_empty(self):
+        """Empty string returns empty string."""
+        assert mark_block_as_new("") == ""
+        assert mark_block_as_new("   ") == ""
+
+    def test_strips_existing_markers(self):
+        """Existing markers are stripped to avoid nesting."""
+        text = f"Already {MARK_START}marked{MARK_END} text"
+        result = mark_block_as_new(text)
+        assert result == f"{MARK_START}Already marked text{MARK_END}"
+        # No nested markers
+        assert result.count(MARK_START) == 1
+        assert result.count(MARK_END) == 1
+
+    def test_faq_question_scenario(self):
+        """FAQ question is fully wrapped."""
+        question = "What security cameras are best for property monitoring?"
+        result = mark_block_as_new(question)
+        assert result.startswith(MARK_START)
+        assert result.endswith(MARK_END)
+        assert "What security cameras" in result
+
+    def test_faq_answer_scenario(self):
+        """FAQ answer (multi-sentence) is fully wrapped."""
+        answer = "External cameras provide essential monitoring. They can capture visitor photos and license plates."
+        result = mark_block_as_new(answer)
+        assert result == f"{MARK_START}{answer}{MARK_END}"
+
+
+class TestNormalizeTokenForDiff:
+    """Tests for punctuation normalization in diff comparison."""
+
+    def test_curly_apostrophe_normalized(self):
+        """Curly apostrophe (U+2019) is normalized to straight quote."""
+        # This is the main bug: CellGate's vs CellGate's
+        assert normalize_token_for_diff("CellGate\u2019s") == "CellGate's"
+
+    def test_left_single_quote_normalized(self):
+        """Left single quote (U+2018) is normalized to straight quote."""
+        assert normalize_token_for_diff("\u2018hello") == "'hello"
+
+    def test_double_quotes_normalized(self):
+        """Smart double quotes are normalized to straight double quotes."""
+        assert normalize_token_for_diff("\u201Cquote\u201D") == '"quote"'
+
+    def test_en_dash_normalized(self):
+        """En dash (U+2013) is normalized to hyphen."""
+        assert normalize_token_for_diff("2019\u20132023") == "2019-2023"
+
+    def test_em_dash_normalized(self):
+        """Em dash (U+2014) is normalized to hyphen."""
+        assert normalize_token_for_diff("word\u2014another") == "word-another"
+
+    def test_ellipsis_normalized(self):
+        """Horizontal ellipsis (U+2026) is normalized to three dots."""
+        assert normalize_token_for_diff("wait\u2026") == "wait..."
+
+    def test_plain_text_unchanged(self):
+        """Plain ASCII text is unchanged."""
+        assert normalize_token_for_diff("CellGate's") == "CellGate's"
+
+    def test_empty_token_unchanged(self):
+        """Empty string returns empty string."""
+        assert normalize_token_for_diff("") == ""
+
+
+class TestPunctuationInDiff:
+    """Tests for punctuation normalization affecting diff results."""
+
+    def test_curly_vs_straight_apostrophe_no_highlight(self):
+        """Curly apostrophe in rewritten vs straight in original: no highlight."""
+        # Original uses straight apostrophe
+        original = "CellGate's system is great."
+        # Rewritten uses curly apostrophe (U+2019) but otherwise identical
+        rewritten = "CellGate\u2019s system is great."
+
+        result = add_markers_by_diff(original, rewritten)
+
+        # Should NOT highlight - they're semantically the same
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+    def test_mixed_punctuation_differences_no_highlight(self):
+        """Various punctuation differences should not trigger highlights."""
+        # Original with straight punctuation
+        original = "It's a \"test\" - really."
+        # Rewritten with curly/smart punctuation (single dash vs em dash is same token count)
+        rewritten = "It\u2019s a \u201Ctest\u201D \u2014 really."
+
+        result = add_markers_by_diff(original, rewritten)
+
+        # Should NOT highlight punctuation-only differences
+        assert MARK_START not in result
+
+    def test_real_content_change_still_highlighted(self):
+        """Real content changes are still highlighted despite punctuation."""
+        original = "CellGate's system works well."
+        rewritten = "CellGate\u2019s NEW system works perfectly."
+
+        result = add_markers_by_diff(original, rewritten)
+
+        # Should highlight the actual changes (NEW, perfectly)
+        assert MARK_START in result
+        assert "NEW" in result or "perfectly" in result
 
 
 class TestExpandMarkersToFullSentence:
@@ -588,3 +706,242 @@ class TestCellGateRegression:
         clean = strip_markers(result)
         assert "This compact, fixed-focus camera" in clean
         assert "entry gates" in clean
+
+
+class TestFilterMarkersByKeywords:
+    """Tests for the filter_markers_by_keywords function."""
+
+    def test_keeps_markers_with_keyword(self):
+        """Markers containing keywords are kept."""
+        text = f"Hello {MARK_START}security cameras{MARK_END} world."
+        keywords = ["security cameras"]
+
+        result = filter_markers_by_keywords(text, keywords)
+
+        assert MARK_START in result
+        assert "security cameras" in result
+
+    def test_removes_markers_without_keyword(self):
+        """Markers without keywords are removed but text is kept."""
+        text = f"Hello {MARK_START}random change{MARK_END} world."
+        keywords = ["security cameras", "access control"]
+
+        result = filter_markers_by_keywords(text, keywords)
+
+        # Markers should be removed
+        assert MARK_START not in result
+        assert MARK_END not in result
+        # But text should remain
+        assert "random change" in result
+        assert result == "Hello random change world."
+
+    def test_mixed_markers_some_kept_some_removed(self):
+        """Some markers kept, others removed based on keywords."""
+        text = f"The {MARK_START}security camera{MARK_END} provides {MARK_START}excellent{MARK_END} monitoring."
+        keywords = ["security camera"]
+
+        result = filter_markers_by_keywords(text, keywords)
+
+        # "security camera" markers kept
+        assert f"{MARK_START}security camera{MARK_END}" in result
+        # "excellent" markers removed
+        assert "excellent" in result
+        assert result.count(MARK_START) == 1
+
+    def test_case_insensitive_matching(self):
+        """Keyword matching is case-insensitive."""
+        text = f"The {MARK_START}Security Cameras{MARK_END} are great."
+        keywords = ["security cameras"]
+
+        result = filter_markers_by_keywords(text, keywords)
+
+        assert MARK_START in result
+
+    def test_no_markers_returns_unchanged(self):
+        """Text without markers is returned unchanged."""
+        text = "Hello world with no markers."
+        keywords = ["security"]
+
+        result = filter_markers_by_keywords(text, keywords)
+
+        assert result == text
+
+    def test_empty_keywords_keeps_all_markers(self):
+        """Empty keyword list keeps all markers."""
+        text = f"Hello {MARK_START}marked{MARK_END} world."
+        keywords = []
+
+        result = filter_markers_by_keywords(text, keywords)
+
+        assert MARK_START in result
+
+    def test_partial_keyword_match(self):
+        """Partial keyword match (keyword as substring) works."""
+        text = f"The {MARK_START}external cameras{MARK_END} work well."
+        keywords = ["camera"]  # Partial match
+
+        result = filter_markers_by_keywords(text, keywords)
+
+        assert MARK_START in result
+
+    def test_cellgate_scenario(self):
+        """Real CellGate scenario: filter non-SEO changes."""
+        # Simulates: "CellGate's" highlighted due to apostrophe but no keyword
+        text = f"The {MARK_START}CellGate's{MARK_END} system provides {MARK_START}external cameras{MARK_END} for security."
+        keywords = ["external cameras", "security cameras", "access control"]
+
+        result = filter_markers_by_keywords(text, keywords)
+
+        # "external cameras" contains keyword - keep markers
+        assert f"{MARK_START}external cameras{MARK_END}" in result
+        # "CellGate's" has no keyword - remove markers
+        assert "CellGate's" in result
+        # Should only have one marker pair
+        assert result.count(MARK_START) == 1
+
+
+class TestCurlyQuoteNormalization:
+    """Tests specifically for curly quote and smart punctuation handling."""
+
+    def test_curly_apostrophe_in_possessive_not_highlighted(self):
+        """Words with curly apostrophe like 'CellGate's' should not be highlighted."""
+        # Original has straight apostrophe, optimized has curly
+        original = "CellGate's system is great."
+        rewritten = "CellGate\u2019s system is great."  # \u2019 is curly apostrophe
+
+        result = compute_markers(original, rewritten)
+
+        # Should have NO markers - they're equivalent
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+    def test_lets_with_curly_apostrophe_not_highlighted(self):
+        """Let's with curly apostrophe should match Let's with straight."""
+        original = "Let's explore the options."
+        rewritten = "Let\u2019s explore the options."
+
+        result = compute_markers(original, rewritten)
+
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+    def test_propertys_with_curly_apostrophe_not_highlighted(self):
+        """property's with curly apostrophe should match straight."""
+        original = "Your property's security is important."
+        rewritten = "Your property\u2019s security is important."
+
+        result = compute_markers(original, rewritten)
+
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+    def test_smart_double_quotes_not_highlighted(self):
+        """Smart double quotes should match straight double quotes."""
+        original = 'They said "hello" to everyone.'
+        rewritten = "They said \u201chello\u201d to everyone."  # \u201c \u201d are curly double quotes
+
+        result = compute_markers(original, rewritten)
+
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+    def test_en_dash_vs_hyphen_not_highlighted(self):
+        """En dash should match hyphen."""
+        original = "We offer 24-7 support."
+        rewritten = "We offer 24\u20137 support."  # \u2013 is en dash
+
+        result = compute_markers(original, rewritten)
+
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+    def test_multiple_curly_quote_words_unchanged(self):
+        """Multiple words with curly quotes should all remain unchanged."""
+        original = "CellGate's property's system Let's cameras"
+        rewritten = "CellGate\u2019s property\u2019s system Let\u2019s cameras"
+
+        result = compute_markers(original, rewritten)
+
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+
+class TestEndToEndPipeline:
+    """End-to-end tests simulating the full optimizer pipeline."""
+
+    def test_full_pipeline_curly_quotes_filtered(self):
+        """Test the full pipeline: compute_markers + filter_markers_by_keywords."""
+        # Simulate the optimizer: original has straight quotes, LLM returns curly
+        original = "CellGate's external cameras provide property's security."
+        rewritten = "CellGate\u2019s external cameras provide property\u2019s security."
+
+        # First compute markers
+        marked = compute_markers(original, rewritten)
+
+        # If any markers exist (shouldn't after normalization fix), filter them
+        keywords = ["external cameras", "security cameras", "property security"]
+        result = filter_markers_by_keywords(marked, keywords)
+
+        # Should have no markers because:
+        # 1. Normalization should prevent curly quote differences from being marked
+        # 2. Even if marked, filter should remove "CellGate's" and "property's"
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+    def test_full_pipeline_real_change_with_keyword_highlighted(self):
+        """Test that real SEO changes containing keywords are highlighted."""
+        original = "Our system provides monitoring."
+        rewritten = "Our security camera system provides comprehensive monitoring."
+
+        marked = compute_markers(original, rewritten)
+        keywords = ["security camera", "comprehensive monitoring"]
+        result = filter_markers_by_keywords(marked, keywords)
+
+        # Should have markers because real change with keyword
+        assert MARK_START in result
+        # The keyword content should be in the result
+        assert "security camera" in strip_markers(result)
+
+    def test_full_pipeline_change_without_keyword_removed(self):
+        """Test that changes NOT containing keywords have markers removed."""
+        original = "The excellent system works well."
+        rewritten = "The amazing system works well."
+
+        marked = compute_markers(original, rewritten)
+        keywords = ["security camera", "access control"]
+        result = filter_markers_by_keywords(marked, keywords)
+
+        # "amazing" should NOT be highlighted (no keyword)
+        assert MARK_START not in result
+        assert MARK_END not in result
+        # But text should remain
+        assert "amazing" in result
+
+    def test_cellgate_real_world_scenario(self):
+        """Comprehensive test of CellGate-like optimization."""
+        # Original content
+        original = """When it comes to securing any property, having the right camera system in place is essential. When complex camera, surveillance, and video setups are not necessary for a property, the use of simpler external cameras integrated with an access control or visitor management solution (like CellGate's Entría and/or Watchman lines) can provide the right layer of extra security."""
+
+        # LLM might change some punctuation and add keywords
+        rewritten = """When it comes to securing any property, having the right camera system in place is essential. When complex camera, surveillance, and video setups are not necessary for a property, the use of simpler external cameras integrated with an access control or visitor management solution (like CellGate\u2019s Entría and/or Watchman lines) can provide the right layer of extra security for your property security needs."""
+
+        marked = compute_markers(original, rewritten, full_original_text=original)
+        keywords = ["external cameras", "property security", "access control", "camera system"]
+        result = filter_markers_by_keywords(marked, keywords)
+
+        # "CellGate's" should NOT be highlighted (curly quote only)
+        # But if new text "for your property security needs" was added, it should be
+        clean = strip_markers(result)
+        assert "CellGate" in clean  # Text still present
+        # Check marker count - should only mark new SEO-relevant additions
+        if "property security needs" in rewritten:
+            # If new content added with keyword, it should be marked
+            if MARK_START in result:
+                # Verify the marked content contains a keyword
+                import re
+                marker_pattern = rf"{re.escape(MARK_START)}(.*?){re.escape(MARK_END)}"
+                matches = re.findall(marker_pattern, result)
+                for match in matches:
+                    match_lower = match.lower()
+                    has_keyword = any(kw.lower() in match_lower for kw in keywords)
+                    assert has_keyword, f"Marked content '{match}' has no keyword"

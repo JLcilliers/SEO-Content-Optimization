@@ -19,6 +19,7 @@ Key guarantees:
 """
 
 import re
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Optional
 
@@ -38,12 +39,52 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.80
 # Minimum word count for phrase-level diff (short sentences always wrap entire)
 MIN_WORDS_FOR_PHRASE_DIFF = 6
 
+# Punctuation normalization map for diff comparison
+# Maps typographic/smart punctuation to ASCII equivalents
+# Using explicit Unicode code points to avoid encoding issues
+PUNCT_NORMALIZE_MAP = str.maketrans({
+    "\u2019": "'",  # Right single quote → straight quote
+    "\u2018": "'",  # Left single quote → straight quote
+    "\u201B": "'",  # Single high-reversed-9 quotation mark → straight quote
+    "\u201C": '"',  # Left double quote → straight double quote
+    "\u201D": '"',  # Right double quote → straight double quote
+    "\u201F": '"',  # Double high-reversed-9 quotation mark → straight double quote
+    "\u2013": "-",  # En dash → hyphen
+    "\u2014": "-",  # Em dash → hyphen
+})
+
+
+def normalize_token_for_diff(token: str) -> str:
+    """
+    Normalize a token for diff comparison purposes.
+
+    Applies Unicode NFKC normalization and maps typographic punctuation
+    to ASCII equivalents. This prevents false positives from curly quotes,
+    smart apostrophes, and other typographic variations.
+
+    Args:
+        token: The token to normalize.
+
+    Returns:
+        Normalized token for comparison (not for output).
+    """
+    if not token:
+        return token
+    # Apply Unicode NFKC normalization (compatibility decomposition + composition)
+    normalized = unicodedata.normalize("NFKC", token)
+    # Apply punctuation mapping
+    normalized = normalized.translate(PUNCT_NORMALIZE_MAP)
+    # Handle ellipsis separately (maps to multiple chars)
+    normalized = normalized.replace("…", "...")
+    return normalized
+
 
 def normalize_sentence(s: str) -> str:
     """
     Normalize a sentence for equality comparison.
 
     Lowercased, single-spaced, strip leading/trailing whitespace.
+    Also normalizes punctuation (curly quotes → straight quotes, etc.).
 
     Args:
         s: The sentence to normalize.
@@ -55,6 +96,8 @@ def normalize_sentence(s: str) -> str:
         return ""
     s = s.strip()
     s = re.sub(r"\s+", " ", s)
+    # Normalize punctuation before lowercasing
+    s = normalize_token_for_diff(s)
     return s.lower()
 
 
@@ -163,7 +206,12 @@ def add_markers_by_diff(original: str, rewritten: str) -> str:
     orig_tokens = tokenize(original)
     new_tokens = tokenize(rewritten)
 
-    sm = SequenceMatcher(None, orig_tokens, new_tokens, autojunk=False)
+    # Normalize tokens for comparison (handles curly quotes, smart apostrophes, etc.)
+    # We compare normalized versions but output the original tokens
+    orig_tokens_normalized = [normalize_token_for_diff(t) for t in orig_tokens]
+    new_tokens_normalized = [normalize_token_for_diff(t) for t in new_tokens]
+
+    sm = SequenceMatcher(None, orig_tokens_normalized, new_tokens_normalized, autojunk=False)
     out: list[str] = []
     in_add = False
 
@@ -243,6 +291,27 @@ def strip_markers(text: str) -> str:
         Text with markers removed.
     """
     return text.replace(MARK_START, "").replace(MARK_END, "")
+
+
+def mark_block_as_new(text: str) -> str:
+    """
+    Wrap an entire block of text in markers to mark it as new content.
+
+    Use this for content that is entirely new (like FAQ items) and should
+    be fully highlighted without any diff comparison.
+
+    Args:
+        text: Plain text to mark as new.
+
+    Returns:
+        Text wrapped in [[[ADD]]]...[[[ENDADD]]] markers.
+        Returns empty string if text is empty.
+    """
+    if not text or not text.strip():
+        return ""
+    # Strip any existing markers first to avoid nesting
+    clean_text = strip_markers(text)
+    return f"{MARK_START}{clean_text}{MARK_END}"
 
 
 def expand_markers_to_full_sentence(original: str, marked: str) -> str:
@@ -523,3 +592,62 @@ def inject_phrase_with_markers(
             # Insert before final punctuation
             return text[:-1] + f" - {marked_phrase}" + text[-1]
         return text + f" - {marked_phrase}"
+
+
+def filter_markers_by_keywords(
+    text_with_markers: str,
+    keywords: list[str],
+) -> str:
+    """
+    Filter out markers that don't contain any SEO-relevant keywords.
+
+    For each [[[ADD]]]...[[[ENDADD]]] block, checks if the content inside
+    contains any of the specified keywords. If it does, keep the markers.
+    If not, remove the markers but keep the text content.
+
+    This prevents highlighting of non-SEO changes like punctuation tweaks
+    or minor rewording that doesn't involve target keywords.
+
+    Args:
+        text_with_markers: Text containing [[[ADD]]]...[[[ENDADD]]] markers.
+        keywords: List of keyword phrases to check for (case-insensitive).
+
+    Returns:
+        Text with markers removed from blocks that don't contain keywords.
+    """
+    if not text_with_markers or MARK_START not in text_with_markers:
+        return text_with_markers
+
+    if not keywords:
+        # No keywords to filter by - keep all markers
+        return text_with_markers
+
+    # Normalize keywords for case-insensitive matching
+    keywords_lower = [kw.lower().strip() for kw in keywords if kw.strip()]
+    if not keywords_lower:
+        return text_with_markers
+
+    # Pattern to find marker blocks
+    marker_pattern = re.compile(
+        rf"{re.escape(MARK_START)}(.*?){re.escape(MARK_END)}",
+        re.DOTALL
+    )
+
+    def replace_if_no_keyword(match: re.Match) -> str:
+        """Replace marker block - keep markers only if contains keyword."""
+        content = match.group(1)
+        content_lower = content.lower()
+
+        # Check if any keyword is in the content
+        for keyword in keywords_lower:
+            if keyword in content_lower:
+                # Keyword found - keep the markers
+                return match.group(0)
+
+        # No keyword found - remove markers but keep content
+        return content
+
+    # Apply filter to all marker blocks
+    result = marker_pattern.sub(replace_if_no_keyword, text_with_markers)
+
+    return result
