@@ -29,33 +29,30 @@ SEO_SYSTEM_PROMPT = """You are an expert SEO content optimizer. Your task is to 
 
 CRITICAL RULES - MUST FOLLOW:
 1. Keep all original text unless modification is necessary for SEO
-2. Mark ALL new or changed text with [[[ADD]]] and [[[ENDADD]]] markers
-3. Never delete significant original content - only add or modify
-4. Maintain the original tone and style
-5. Do not invent facts or make claims not supported by the original content
-6. Keep sentences natural and readable - avoid keyword stuffing
+2. Never delete significant original content - only add or modify
+3. Maintain the original tone and style
+4. Do not invent facts or make claims not supported by the original content
+5. Keep sentences natural and readable - avoid keyword stuffing
 
 KEYWORD PHRASE INTEGRITY - ESSENTIAL:
-7. Use keywords as COMPLETE PHRASES - never break them into separate words
-8. "payment processing solutions" = use this exact 3-word phrase together
-9. Long-tail keywords must appear as one unbroken phrase in a single location
-10. NEVER scatter individual words from a keyword phrase across different sentences
+6. Use keywords as COMPLETE PHRASES - never break them into separate words
+7. "payment processing solutions" = use this exact 3-word phrase together
+8. Long-tail keywords must appear as one unbroken phrase in a single location
+9. NEVER scatter individual words from a keyword phrase across different sentences
 
 STRICT TOPICAL CONSTRAINTS - VIOLATIONS WILL BE REJECTED:
-11. NEVER introduce industries, verticals, or business types not already in the original content
-12. NEVER add mentions of: cannabis, hemp, CBD, gambling, adult content, firearms, or other high-risk industries unless they are explicitly in the original
-13. NEVER claim the company "specializes in" or "serves" industries not mentioned in the original
-14. ONLY use keywords that directly relate to what the page is actually about
-15. Do not stuff the company/brand name repeatedly - keep brand mentions reasonable and natural
-16. If a keyword doesn't fit the page topic, DO NOT force it in - skip it entirely
+10. NEVER introduce industries, verticals, or business types not already in the original content
+11. NEVER add mentions of: cannabis, hemp, CBD, gambling, adult content, firearms, or other high-risk industries unless they are explicitly in the original
+12. NEVER claim the company "specializes in" or "serves" industries not mentioned in the original
+13. ONLY use keywords that directly relate to what the page is actually about
+14. Do not stuff the company/brand name repeatedly - keep brand mentions reasonable and natural
+15. If a keyword doesn't fit the page topic, DO NOT force it in - skip it entirely
 
-MARKER FORMAT:
-- Wrap only the NEW or CHANGED portions with markers
-- Example: "We offer [[[ADD]]]comprehensive PTO insurance[[[ENDADD]]] coverage."
-- For new sentences: "[[[ADD]]]This is a completely new sentence.[[[ENDADD]]]"
-- Multiple changes in one text block are fine: "Our [[[ADD]]]professional[[[ENDADD]]] team provides [[[ADD]]]expert insurance solutions[[[ENDADD]]] for your needs."
-
-Do NOT include any explanation or commentary - return ONLY the optimized text with markers."""
+OUTPUT FORMAT:
+- Return ONLY the optimized text
+- Do NOT include any markers, tags, or formatting annotations
+- Do NOT include any explanation or commentary
+- Just return the clean optimized text"""
 
 
 class LLMClient:
@@ -172,16 +169,15 @@ Requirements:
 - Include the primary keyword within the first 30 characters if possible
 - Make it compelling and click-worthy
 - Stay under {max_length} characters
-- Mark all new/changed text with [[[ADD]]]...[[[ENDADD]]] markers
-- If there's a current title, preserve what works and mark only changes
+- If there's a current title, use it as inspiration but optimize for SEO
 
-Return ONLY the optimized title with markers, nothing else."""
+Return ONLY the optimized title as plain text, nothing else. No markers, no explanations."""
 
         try:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=200,
-                system="You are an SEO title optimization expert. Return only the optimized title with change markers.",
+                system="You are an SEO title optimization expert. Return only the optimized title as plain text.",
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text.strip()
@@ -219,15 +215,14 @@ Requirements:
 - Include a clear call-to-action (e.g., "Learn more", "Get a quote", "Discover how")
 - Be compelling and informative
 - Stay under {max_length} characters
-- Mark all new/changed text with [[[ADD]]]...[[[ENDADD]]] markers
 
-Return ONLY the optimized description with markers, nothing else."""
+Return ONLY the optimized description as plain text, nothing else. No markers, no explanations."""
 
         try:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=300,
-                system="You are an SEO meta description expert. Return only the optimized description with change markers.",
+                system="You are an SEO meta description expert. Return only the optimized description as plain text.",
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text.strip()
@@ -264,15 +259,14 @@ Requirements:
 - More descriptive than the title
 - Not an exact copy of the title
 - Clear and engaging
-- Mark all new/changed text with [[[ADD]]]...[[[ENDADD]]] markers
 
-Return ONLY the optimized H1 with markers, nothing else."""
+Return ONLY the optimized H1 as plain text, nothing else. No markers, no explanations."""
 
         try:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=200,
-                system="You are an SEO heading optimization expert. Return only the optimized H1 with change markers.",
+                system="You are an SEO heading optimization expert. Return only the optimized H1 as plain text.",
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text.strip()
@@ -337,8 +331,7 @@ STRICT REQUIREMENTS - READ CAREFULLY:
 1. Each question must be a common user question DIRECTLY related to the page topic: "{topic}"
 2. Answers should be 2-4 sentences, helpful and informative
 3. ONLY use keywords from the ALLOWED KEYWORDS list above - no other keywords
-4. Mark all text with [[[ADD]]]...[[[ENDADD]]] since these are all new
-5. Do NOT make up specific facts, prices, or claims not verifiable
+4. Do NOT make up specific facts, prices, or claims not verifiable
 
 ABSOLUTE RESTRICTIONS - VIOLATIONS WILL BE REJECTED:
 - ONLY use keywords from the EXACT list provided above - introducing other keywords is forbidden
@@ -350,12 +343,12 @@ ABSOLUTE RESTRICTIONS - VIOLATIONS WILL BE REJECTED:
 - If the page is about "X vs Y comparison", FAQs should ONLY be about that comparison
 - Do NOT create generic industry FAQs - be SPECIFIC to this page's exact content
 
-Return in this exact format:
-Q: [[[ADD]]]Question text here?[[[ENDADD]]]
-A: [[[ADD]]]Answer text here.[[[ENDADD]]]
+Return in this exact format (plain text, no markers):
+Q: Question text here?
+A: Answer text here.
 
-Q: [[[ADD]]]Next question?[[[ENDADD]]]
-A: [[[ADD]]]Next answer.[[[ENDADD]]]
+Q: Next question?
+A: Next answer.
 
 (Continue for all {num_items} items)"""
 
@@ -476,15 +469,14 @@ INSTRUCTIONS:
 2. Add the primary keyword naturally in the first paragraph if not present
 3. Weave in secondary keywords ONLY where they fit naturally
 4. Add clarifying phrases or sentences if they help include keywords naturally
-5. Mark ALL additions and changes with [[[ADD]]]...[[[ENDADD]]] markers
-6. Keep the same paragraph structure
-7. Do not be repetitive or stuffed - maintain natural reading flow
+5. Keep the same paragraph structure
+6. Do not be repetitive or stuffed - maintain natural reading flow
 
 CRITICAL PHRASE USAGE RULES:
-8. Use each keyword as a COMPLETE PHRASE - never split it into individual words
-9. "credit card processing" means the FULL phrase, not "credit" and "card" and "processing" separately
-10. Long-tail keywords like "best payment processor for small business" must appear as one complete phrase
-11. Do NOT scatter keyword words throughout unrelated sentences - use the full phrase in one place
+7. Use each keyword as a COMPLETE PHRASE - never split it into individual words
+8. "credit card processing" means the FULL phrase, not "credit" and "card" and "processing" separately
+9. Long-tail keywords like "best payment processor for small business" must appear as one complete phrase
+10. Do NOT scatter keyword words throughout unrelated sentences - use the full phrase in one place
 
 ABSOLUTE RESTRICTIONS - VIOLATIONS WILL BE REJECTED:
 - ONLY use keywords from the EXACT list provided above - no other keywords allowed
@@ -495,7 +487,7 @@ ABSOLUTE RESTRICTIONS - VIOLATIONS WILL BE REJECTED:
 - If a keyword doesn't fit naturally or introduces off-topic concepts, DO NOT use it - skip it entirely
 - Keep brand/company name mentions within the limits specified above
 
-Return the optimized content with markers. Do not include any explanation."""
+Return ONLY the optimized content as plain text. No markers, no explanations, no formatting annotations."""
 
     def _parse_faq_response(self, response: str) -> list[dict[str, str]]:
         """Parse FAQ response into structured format."""

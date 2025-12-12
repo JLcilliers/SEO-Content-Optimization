@@ -21,13 +21,16 @@ from .keyword_filter import (
     log_filter_results,
 )
 from .llm_client import (
-    ADD_END,
-    ADD_START,
     LLMClient,
     create_llm_client,
-    ensure_contains_phrase,
-    ensure_markers_present,
     strip_markers,
+)
+from .diff_markers import (
+    MARK_END as ADD_END,
+    MARK_START as ADD_START,
+    compute_markers,
+    compute_h1_markers,
+    inject_phrase_with_markers,
 )
 from .models import (
     DocxContent,
@@ -200,6 +203,7 @@ class ContentOptimizer:
             current_h1=current_h1,
             keyword_plan=keyword_plan,
             topic=analysis.topic,
+            full_original_text=full_text,
         )
 
         # Step 5: Optimize body content
@@ -207,7 +211,22 @@ class ContentOptimizer:
             blocks=blocks,
             keyword_plan=keyword_plan,
             analysis=analysis,
+            full_original_text=full_text,
         )
+
+        # Step 5.5: Update H1 in body blocks to match optimized H1 from meta elements
+        # This ensures the H1 in "OPTIMIZED CONTENT" matches the meta table
+        optimized_h1_text = None
+        for meta in meta_elements:
+            if meta.element_name == "H1":
+                optimized_h1_text = meta.optimized
+                break
+
+        if optimized_h1_text:
+            optimized_blocks = self._replace_h1_in_blocks(
+                blocks=optimized_blocks,
+                optimized_h1=optimized_h1_text,
+            )
 
         # Step 6: Generate FAQ if requested
         faq_items = []
@@ -280,27 +299,27 @@ class ContentOptimizer:
         current_h1: Optional[str],
         keyword_plan: KeywordPlan,
         topic: str,
+        full_original_text: Optional[str] = None,
     ) -> list[MetaElement]:
         """Optimize title, meta description, and H1."""
         meta_elements = []
         primary = keyword_plan.primary.phrase
 
         # Optimize title
-        optimized_title = self.llm.optimize_meta_title(
+        optimized_title_raw = self.llm.optimize_meta_title(
             current_title=current_title,
             primary_keyword=primary,
             topic=topic,
             max_length=60,
         )
-        # Ensure markers are present if content changed
-        optimized_title = ensure_markers_present(
-            original=current_title or "",
-            optimized=optimized_title,
-            element_type="title",
+        # Use diff-based markers to highlight changes
+        # For meta elements, pass full_original_text for sentence-level semantics
+        optimized_title = compute_markers(
+            current_title or "", optimized_title_raw, full_original_text=full_original_text
         )
         # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in title
-        optimized_title = ensure_contains_phrase(
-            optimized_title, primary, fallback_position="start"
+        optimized_title = self._ensure_phrase_present(
+            optimized_title, primary, current_title or "", position="start"
         )
         meta_elements.append(
             MetaElement(
@@ -312,21 +331,19 @@ class ContentOptimizer:
         )
 
         # Optimize meta description
-        optimized_desc = self.llm.optimize_meta_description(
+        optimized_desc_raw = self.llm.optimize_meta_description(
             current_description=current_meta_desc,
             primary_keyword=primary,
             topic=topic,
             max_length=160,
         )
-        # Ensure markers are present if content changed
-        optimized_desc = ensure_markers_present(
-            original=current_meta_desc or "",
-            optimized=optimized_desc,
-            element_type="meta_description",
+        # Use diff-based markers to highlight changes
+        optimized_desc = compute_markers(
+            current_meta_desc or "", optimized_desc_raw, full_original_text=full_original_text
         )
         # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in meta description
-        optimized_desc = ensure_contains_phrase(
-            optimized_desc, primary, fallback_position="start"
+        optimized_desc = self._ensure_phrase_present(
+            optimized_desc, primary, current_meta_desc or "", position="start"
         )
         meta_elements.append(
             MetaElement(
@@ -339,21 +356,18 @@ class ContentOptimizer:
 
         # Optimize H1
         clean_title = strip_markers(optimized_title)
-        optimized_h1 = self.llm.optimize_h1(
+        optimized_h1_raw = self.llm.optimize_h1(
             current_h1=current_h1,
             primary_keyword=primary,
             title=clean_title,
             topic=topic,
         )
-        # Ensure markers are present if content changed
-        optimized_h1 = ensure_markers_present(
-            original=current_h1 or "",
-            optimized=optimized_h1,
-            element_type="h1",
-        )
+        # Use special H1 marker handling:
+        # If H1 changed at all, wrap ENTIRE H1 in markers (not just changed phrases)
+        optimized_h1 = compute_h1_markers(current_h1 or "", optimized_h1_raw)
         # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in H1
-        optimized_h1 = ensure_contains_phrase(
-            optimized_h1, primary, fallback_position="start"
+        optimized_h1 = self._ensure_phrase_present(
+            optimized_h1, primary, current_h1 or "", position="start"
         )
         meta_elements.append(
             MetaElement(
@@ -366,11 +380,52 @@ class ContentOptimizer:
 
         return meta_elements
 
+    def _ensure_phrase_present(
+        self,
+        marked_text: str,
+        phrase: str,
+        original_text: str,
+        position: str = "start",
+    ) -> str:
+        """
+        Ensure the phrase is present in marked text.
+
+        If the phrase already exists in the original, it should be unmarked.
+        If the phrase is added, it should be marked.
+
+        Args:
+            marked_text: Text with diff markers.
+            phrase: Phrase to ensure is present.
+            original_text: Original text before optimization.
+            position: Where to inject if missing - "start" or "end".
+
+        Returns:
+            Text with phrase guaranteed to be present.
+        """
+        # Check if phrase is already present (case-insensitive)
+        clean_text = strip_markers(marked_text)
+        if phrase.lower() in clean_text.lower():
+            return marked_text  # Already present
+
+        # Check if phrase was in original (shouldn't mark if it was)
+        if phrase.lower() in original_text.lower():
+            # Phrase was in original but somehow removed - add it back unmarked
+            if position == "start":
+                return f"{phrase}: {marked_text}"
+            else:
+                if marked_text.endswith("."):
+                    return f"{marked_text[:-1]} - {phrase}."
+                return f"{marked_text} | {phrase}"
+
+        # Phrase is new - add with markers
+        return inject_phrase_with_markers(marked_text, phrase, position)
+
     def _optimize_body_content(
         self,
         blocks: list[ParagraphBlock],
         keyword_plan: KeywordPlan,
         analysis: ContentAnalysis,
+        full_original_text: Optional[str] = None,
     ) -> list[ParagraphBlock]:
         """Optimize body content blocks."""
         if not blocks:
@@ -398,6 +453,7 @@ class ContentOptimizer:
                     primary,
                     secondary,
                     block.heading_level,
+                    full_original_text=full_original_text,
                 )
                 optimized_blocks.append(
                     ParagraphBlock(
@@ -407,7 +463,7 @@ class ContentOptimizer:
                     )
                 )
             elif i < 3:  # First few paragraphs get full optimization
-                optimized_text = self.llm.rewrite_with_markers(
+                rewritten_text = self.llm.rewrite_with_markers(
                     content=block.text,
                     primary_keyword=primary,
                     secondary_keywords=secondary[:3],
@@ -415,11 +471,9 @@ class ContentOptimizer:
                     content_topics=content_topics,
                     brand_context=getattr(self, '_brand_context', None),
                 )
-                # Ensure markers are present if content changed
-                optimized_text = ensure_markers_present(
-                    original=block.text,
-                    optimized=optimized_text,
-                    element_type="paragraph",
+                # Apply diff-based markers to highlight actual changes
+                optimized_text = compute_markers(
+                    block.text, strip_markers(rewritten_text), full_original_text=full_original_text
                 )
                 optimized_blocks.append(
                     ParagraphBlock(
@@ -437,7 +491,7 @@ class ContentOptimizer:
 
                 if not has_primary and not has_secondary and len(block.text) > 100:
                     # Optimize to add keywords
-                    optimized_text = self.llm.rewrite_with_markers(
+                    rewritten_text = self.llm.rewrite_with_markers(
                         content=block.text,
                         primary_keyword=primary,
                         secondary_keywords=secondary[:2],
@@ -445,11 +499,9 @@ class ContentOptimizer:
                         content_topics=content_topics,
                         brand_context=getattr(self, '_brand_context', None),
                     )
-                    # Ensure markers are present if content changed
-                    optimized_text = ensure_markers_present(
-                        original=block.text,
-                        optimized=optimized_text,
-                        element_type="paragraph",
+                    # Apply diff-based markers to highlight actual changes
+                    optimized_text = compute_markers(
+                        block.text, strip_markers(rewritten_text), full_original_text=full_original_text
                     )
                     optimized_blocks.append(
                         ParagraphBlock(
@@ -470,6 +522,7 @@ class ContentOptimizer:
         primary: str,
         secondary: list[str],
         level: HeadingLevel,
+        full_original_text: Optional[str] = None,
     ) -> str:
         """Optimize a heading to include keywords where appropriate."""
         text_lower = text.lower()
@@ -493,28 +546,60 @@ Secondary keywords: {', '.join(secondary[:3])}
 Requirements:
 - Keep the heading concise and clear
 - Only add keyword if it fits naturally
-- Mark changes with [[[ADD]]]...[[[ENDADD]]]
 - If no natural fit, return the original heading unchanged
 
-Return ONLY the optimized heading."""
+Return ONLY the optimized heading text, with no markers or annotations."""
 
         try:
             response = self.llm.client.messages.create(
                 model=self.llm.model,
                 max_tokens=100,
-                system="You are an SEO heading optimizer. Return only the optimized heading.",
+                system="You are an SEO heading optimizer. Return only the plain optimized heading text.",
                 messages=[{"role": "user", "content": prompt}],
             )
-            optimized = response.content[0].text.strip()
-            # Ensure markers are present if content changed
-            return ensure_markers_present(
-                original=text,
-                optimized=optimized,
-                element_type="heading",
-            )
+            rewritten = response.content[0].text.strip()
+            # Apply diff-based markers to highlight actual changes
+            return compute_markers(text, strip_markers(rewritten), full_original_text=full_original_text)
         except Exception:
             # On error, return original
             return text
+
+    def _replace_h1_in_blocks(
+        self,
+        blocks: list[ParagraphBlock],
+        optimized_h1: str,
+    ) -> list[ParagraphBlock]:
+        """
+        Replace the H1 block in body content with the optimized H1.
+
+        This ensures the first H1 in "OPTIMIZED CONTENT" matches the
+        optimized H1 shown in the meta elements table.
+
+        Args:
+            blocks: The body content blocks.
+            optimized_h1: The optimized H1 text (with markers).
+
+        Returns:
+            Updated blocks with H1 replaced.
+        """
+        result = []
+        h1_replaced = False
+
+        for block in blocks:
+            if block.heading_level == HeadingLevel.H1 and not h1_replaced:
+                # Replace with optimized H1
+                result.append(
+                    ParagraphBlock(
+                        text=optimized_h1,
+                        heading_level=HeadingLevel.H1,
+                        style_name=block.style_name,
+                    )
+                )
+                h1_replaced = True
+            else:
+                result.append(block)
+
+        return result
 
     def _ensure_all_keywords_present(
         self,
