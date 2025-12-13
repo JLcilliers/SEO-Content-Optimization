@@ -28,12 +28,12 @@ from .llm_client import (
 from .diff_markers import (
     MARK_END as ADD_END,
     MARK_START as ADD_START,
-    compute_markers,
+    compute_markers_v2,  # V2: sentence-level diff (no token-level partial highlights)
     compute_h1_markers,
     inject_phrase_with_markers,
     mark_block_as_new,
-    # filter_markers_by_keywords is kept in diff_markers.py for potential future
-    # "SEO-only diff" mode, but not used in full diff mode
+    build_original_sentence_index,
+    normalize_sentence,
 )
 from .models import (
     DocxContent,
@@ -316,8 +316,8 @@ class ContentOptimizer:
             topic=topic,
             max_length=60,
         )
-        # Full diff mode: highlight ALL changes (no keyword filtering)
-        optimized_title = self._compute_markers_full_diff(
+        # V2: Sentence-level diff (full sentences highlighted, no partial)
+        optimized_title = self._compute_markers_v2(
             current_title or "", optimized_title_raw, full_original_text=full_original_text
         )
         # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in title
@@ -340,8 +340,8 @@ class ContentOptimizer:
             topic=topic,
             max_length=160,
         )
-        # Full diff mode: highlight ALL changes (no keyword filtering)
-        optimized_desc = self._compute_markers_full_diff(
+        # V2: Sentence-level diff (full sentences highlighted, no partial)
+        optimized_desc = self._compute_markers_v2(
             current_meta_desc or "", optimized_desc_raw, full_original_text=full_original_text
         )
         # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in meta description
@@ -423,30 +423,35 @@ class ContentOptimizer:
         # Phrase is new - add with markers
         return inject_phrase_with_markers(marked_text, phrase, position)
 
-    def _compute_markers_full_diff(
+    def _compute_markers_v2(
         self,
         original: str,
         optimized: str,
         full_original_text: Optional[str] = None,
     ) -> str:
         """
-        Full diff mode: highlight ALL real changes between original and optimized.
+        V2 Sentence-Level Diff: highlight changed/new ENTIRE sentences.
 
-        This implements true track-changes behavior where every real change
-        (new or modified text) is highlighted green, and only unchanged text
-        remains black. Matches the Reading Guide statement:
-        "Text highlighted in green indicates keyword insertions or SEO-focused
-        adjustments. All non-highlighted text remains unchanged from the original."
+        This implements the V2 semantics where:
+        - A sentence is either FULLY unchanged (black) or FULLY changed (green)
+        - NO token-level diff inside sentences
+        - Eliminates confusing partial highlights
+
+        Algorithm:
+        1. Build sentence index from full_original_text
+        2. For each sentence in optimized:
+           - If normalized sentence exists in index → UNCHANGED (black)
+           - Else → CHANGED/NEW → wrap ENTIRE sentence (green)
 
         Args:
-            original: Original text.
+            original: Original text block.
             optimized: Optimized text (without markers).
             full_original_text: Full document text for context.
 
         Returns:
-            Text with markers around ALL changes (no keyword filtering).
+            Text with markers around changed/new sentences (no partial highlights).
         """
-        return compute_markers(original, optimized, full_original_text=full_original_text)
+        return compute_markers_v2(original, optimized, full_original_text=full_original_text)
 
     def _optimize_body_content(
         self,
@@ -499,8 +504,8 @@ class ContentOptimizer:
                     content_topics=content_topics,
                     brand_context=getattr(self, '_brand_context', None),
                 )
-                # Full diff mode: highlight ALL changes (no keyword filtering)
-                optimized_text = self._compute_markers_full_diff(
+                # V2: Sentence-level diff (full sentences highlighted, no partial)
+                optimized_text = self._compute_markers_v2(
                     block.text, strip_markers(rewritten_text), full_original_text=full_original_text
                 )
                 optimized_blocks.append(
@@ -527,8 +532,8 @@ class ContentOptimizer:
                         content_topics=content_topics,
                         brand_context=getattr(self, '_brand_context', None),
                     )
-                    # Full diff mode: highlight ALL changes (no keyword filtering)
-                    optimized_text = self._compute_markers_full_diff(
+                    # V2: Sentence-level diff (full sentences highlighted, no partial)
+                    optimized_text = self._compute_markers_v2(
                         block.text, strip_markers(rewritten_text), full_original_text=full_original_text
                     )
                     optimized_blocks.append(
@@ -586,8 +591,8 @@ Return ONLY the optimized heading text, with no markers or annotations."""
                 messages=[{"role": "user", "content": prompt}],
             )
             rewritten = response.content[0].text.strip()
-            # Full diff mode: highlight ALL changes (no keyword filtering)
-            return self._compute_markers_full_diff(
+            # V2: Sentence-level diff (full sentences highlighted, no partial)
+            return self._compute_markers_v2(
                 text, strip_markers(rewritten), full_original_text=full_original_text
             )
         except Exception:

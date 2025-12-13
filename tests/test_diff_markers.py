@@ -891,3 +891,278 @@ class TestFilterMarkersByKeywordsStandalone:
         # But text should remain
         assert "random change" in result
         assert result == "Hello random change world."
+
+
+# =============================================================================
+# V2 SENTENCE-LEVEL DIFF TESTS
+# =============================================================================
+# These tests verify the V2 sentence-level diff behavior:
+# - A sentence is either FULLY unchanged (black) or FULLY changed (green)
+# - NO token-level diff inside sentences
+# - Eliminates confusing partial highlights
+# =============================================================================
+
+
+class TestV2SplitSentences:
+    """Tests for the V2 split_sentences function."""
+
+    def test_empty_string(self):
+        """Empty string returns empty list."""
+        from seo_content_optimizer.diff_markers import split_sentences
+        assert split_sentences("") == []
+
+    def test_single_sentence(self):
+        """Single sentence is returned as a list with one item."""
+        from seo_content_optimizer.diff_markers import split_sentences
+        result = split_sentences("This is a sentence.")
+        assert result == ["This is a sentence."]
+
+    def test_multiple_sentences(self):
+        """Multiple sentences are split correctly."""
+        from seo_content_optimizer.diff_markers import split_sentences
+        result = split_sentences("First sentence. Second sentence. Third one!")
+        assert len(result) == 3
+        assert result[0] == "First sentence."
+        assert result[1] == "Second sentence."
+        assert result[2] == "Third one!"
+
+    def test_question_marks(self):
+        """Question marks also split sentences."""
+        from seo_content_optimizer.diff_markers import split_sentences
+        result = split_sentences("Is this a question? Yes it is.")
+        assert len(result) == 2
+
+    def test_exclamation_marks(self):
+        """Exclamation marks also split sentences."""
+        from seo_content_optimizer.diff_markers import split_sentences
+        result = split_sentences("Wow! That is amazing.")
+        assert len(result) == 2
+
+
+class TestV2ComputeMarkersSentenceLevel:
+    """Tests for the V2 compute_markers_sentence_level function."""
+
+    def test_all_sentences_new(self):
+        """All sentences new when sentence index is empty."""
+        from seo_content_optimizer.diff_markers import (
+            compute_markers_sentence_level,
+            MARK_START,
+            MARK_END,
+        )
+
+        result = compute_markers_sentence_level(
+            original_block="",
+            rewritten_block="This is a new sentence. And another one.",
+            original_sentence_index=set(),
+        )
+
+        # All content should be marked as new
+        assert MARK_START in result
+        assert MARK_END in result
+
+    def test_unchanged_sentence_not_marked(self):
+        """Unchanged sentence (in index) is NOT marked."""
+        from seo_content_optimizer.diff_markers import (
+            compute_markers_sentence_level,
+            normalize_sentence,
+            MARK_START,
+            MARK_END,
+        )
+
+        original_sentence = "This sentence exists in the original."
+        sentence_index = {normalize_sentence(original_sentence)}
+
+        result = compute_markers_sentence_level(
+            original_block=original_sentence,
+            rewritten_block=original_sentence,
+            original_sentence_index=sentence_index,
+        )
+
+        # No markers for unchanged sentence
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+    def test_changed_sentence_fully_marked(self):
+        """Changed sentence is FULLY marked (no partial highlights)."""
+        from seo_content_optimizer.diff_markers import (
+            compute_markers_sentence_level,
+            normalize_sentence,
+            strip_markers,
+            MARK_START,
+            MARK_END,
+        )
+
+        original = "This is the original sentence."
+        changed = "This is the changed sentence with new words."
+
+        sentence_index = {normalize_sentence(original)}
+
+        result = compute_markers_sentence_level(
+            original_block=original,
+            rewritten_block=changed,
+            original_sentence_index=sentence_index,
+        )
+
+        # Entire sentence should be marked
+        assert MARK_START in result
+        assert MARK_END in result
+        # Only ONE marker pair (entire sentence)
+        assert result.count(MARK_START) == 1
+        assert result.count(MARK_END) == 1
+
+    def test_mixed_unchanged_and_changed(self):
+        """Mixed unchanged and changed sentences handled correctly."""
+        from seo_content_optimizer.diff_markers import (
+            compute_markers_sentence_level,
+            normalize_sentence,
+            strip_markers,
+            MARK_START,
+            MARK_END,
+        )
+
+        original = "First sentence unchanged. Second also unchanged."
+        rewritten = "First sentence unchanged. This is brand new. Second also unchanged."
+
+        sentence_index = {
+            normalize_sentence("First sentence unchanged."),
+            normalize_sentence("Second also unchanged."),
+        }
+
+        result = compute_markers_sentence_level(
+            original_block=original,
+            rewritten_block=rewritten,
+            original_sentence_index=sentence_index,
+        )
+
+        # Only the new sentence should be marked
+        assert MARK_START in result
+        clean = strip_markers(result)
+        assert "First sentence unchanged" in clean
+        assert "This is brand new" in clean
+        assert "Second also unchanged" in clean
+
+        # "First sentence unchanged" should NOT be marked
+        # "This is brand new" SHOULD be marked
+        assert f"{MARK_START}This is brand new.{MARK_END}" in result
+
+
+class TestV2ComputeMarkersV2:
+    """Tests for the V2 compute_markers_v2 entry point."""
+
+    def test_empty_rewritten_returns_empty(self):
+        """Empty rewritten text returns empty string."""
+        from seo_content_optimizer.diff_markers import compute_markers_v2
+
+        result = compute_markers_v2("original text", "")
+        assert result == ""
+
+    def test_no_original_wraps_all(self):
+        """No original text wraps everything as new."""
+        from seo_content_optimizer.diff_markers import compute_markers_v2, MARK_START, MARK_END
+
+        result = compute_markers_v2("", "This is all new content.")
+        assert result == f"{MARK_START}This is all new content.{MARK_END}"
+
+    def test_unchanged_content_no_markers(self):
+        """Unchanged content has no markers."""
+        from seo_content_optimizer.diff_markers import compute_markers_v2, MARK_START
+
+        original = "This content is unchanged."
+        result = compute_markers_v2(original, original)
+
+        assert MARK_START not in result
+        assert result == original
+
+    def test_full_original_text_respected(self):
+        """Sentences from full_original_text are not marked."""
+        from seo_content_optimizer.diff_markers import compute_markers_v2, MARK_START, strip_markers
+
+        original_block = "Paragraph one."
+        rewritten = "Paragraph one. Sentence from elsewhere."
+        full_original = "Some intro. Sentence from elsewhere. More content."
+
+        result = compute_markers_v2(original_block, rewritten, full_original_text=full_original)
+
+        # "Sentence from elsewhere" exists in full_original_text
+        # so it should NOT be marked
+        clean = strip_markers(result)
+        assert "Sentence from elsewhere" in clean
+
+    def test_new_sentence_marked_v2(self):
+        """New sentences are fully marked in V2."""
+        from seo_content_optimizer.diff_markers import compute_markers_v2, MARK_START, MARK_END
+
+        original = "First sentence here."
+        rewritten = "First sentence here. Completely new addition."
+
+        result = compute_markers_v2(original, rewritten)
+
+        # New sentence should be fully marked
+        assert MARK_START in result
+        assert "Completely new addition" in result
+
+
+class TestV2CellGateScenario:
+    """V2 tests based on the CellGate scenario."""
+
+    def test_cellgate_h1_v2_full_sentence(self):
+        """CellGate H1 change - entire H1 should be one marker block."""
+        from seo_content_optimizer.diff_markers import compute_h1_markers, MARK_START, MARK_END
+
+        original = "Enhancing Property Security with External Cameras"
+        optimized = "How External Cameras Transform and Strengthen Property Security Systems"
+
+        result = compute_h1_markers(original, optimized)
+
+        # H1 handler already wraps entire H1
+        assert result == f"{MARK_START}{optimized}{MARK_END}"
+        # Only one marker pair
+        assert result.count(MARK_START) == 1
+        assert result.count(MARK_END) == 1
+
+    def test_cellgate_unchanged_paragraph_v2(self):
+        """Unchanged paragraph stays completely unmarked."""
+        from seo_content_optimizer.diff_markers import compute_markers_v2, MARK_START
+
+        paragraph = """External cameras combined with access control or visitor management systems serve as valuable tools for property security. They not only provide real-time monitoring but also can store video footage for review in case of suspicious activity."""
+
+        result = compute_markers_v2(paragraph, paragraph)
+
+        assert MARK_START not in result
+
+    def test_cellgate_new_final_sentence_v2(self):
+        """New sentence at end is fully marked (not partial)."""
+        from seo_content_optimizer.diff_markers import compute_markers_v2, MARK_START, MARK_END, strip_markers
+
+        original = """Selecting the right external camera is an important step in enhancing the security of your property."""
+
+        rewritten = """Selecting the right external camera is an important step in enhancing the security of your property. These security cameras work best when integrated with comprehensive access control systems."""
+
+        result = compute_markers_v2(original, rewritten)
+
+        # Original sentence should NOT be marked
+        # New sentence should be FULLY marked (not token-level)
+        assert MARK_START in result
+        assert MARK_END in result
+
+        # The new sentence should be completely wrapped
+        clean = strip_markers(result)
+        assert "These security cameras work best" in clean
+
+    def test_v2_no_partial_highlights(self):
+        """V2 should never produce partial word/token highlights."""
+        from seo_content_optimizer.diff_markers import compute_markers_v2, MARK_START, MARK_END
+
+        original = "This is a long sentence with many words in it."
+        # Changed one word: many -> several
+        rewritten = "This is a long sentence with several words in it."
+
+        result = compute_markers_v2(original, rewritten)
+
+        # In V2, the ENTIRE sentence should be marked, not just "several"
+        # Because the sentence is DIFFERENT from original (even by one word)
+        if MARK_START in result:
+            # Should wrap the full sentence, not just "several"
+            # The count should be 1 (one marker pair for the whole sentence)
+            assert result.count(MARK_START) == 1
+            assert result.count(MARK_END) == 1

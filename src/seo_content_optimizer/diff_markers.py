@@ -1,21 +1,31 @@
 """
 Diff-based marker insertion for accurate highlighting.
 
-This module computes differences between original and rewritten text
-and inserts [[[ADD]]]/[[[ENDADD]]] markers around ONLY the changed parts.
+V2 SENTENCE-LEVEL SEMANTICS (Simple, Predictable):
+============================================
 
-SENTENCE-LEVEL SEMANTICS:
+This module computes differences between original and rewritten text
+and inserts [[[ADD]]]/[[[ENDADD]]] markers around changed content.
+
+KEY PRINCIPLE: Sentence is the unit of change.
+
 For each sentence S in rewritten text:
-1. If S (normalized) is IDENTICAL to any sentence in full_original_text → NO markers
-2. Else, find most similar sentence S0 in original_block:
-   - If ratio >= SIMILARITY_THRESHOLD (0.80): phrase-level diff (small edits highlighted)
-   - Else: entirely NEW sentence → wrap ENTIRE sentence in markers
+1. Normalize S (NFKC, collapse whitespace, lowercase)
+2. If normalized S exists in original_sentence_index → UNCHANGED (no markers)
+3. Else → CHANGED/NEW → wrap ENTIRE sentence in markers
+
+NO token-level diff inside sentences. A sentence is either:
+- Fully unchanged (black text)
+- Fully changed (green highlight)
+
+This eliminates confusing partial highlights and makes the output predictable.
 
 Key guarantees:
-- Only ACTUALLY new/changed text gets markers
-- Existing text (including keywords) stays unhighlighted
-- Entire new sentences get fully highlighted (not just keywords within them)
-- Modified sentences show only the changed phrases highlighted
+- Green = new/changed sentences
+- Black = sentences identical to original (after normalization)
+- FAQ content is always fully green (it's all new)
+- Meta elements are all-or-nothing (changed = full green)
+- Punctuation-only changes (curly quotes, smart apostrophes) don't trigger highlighting
 """
 
 import re
@@ -651,3 +661,180 @@ def filter_markers_by_keywords(
     result = marker_pattern.sub(replace_if_no_keyword, text_with_markers)
 
     return result
+
+
+# =============================================================================
+# V2 SENTENCE-LEVEL DIFF API
+# =============================================================================
+# The functions below implement the simpler V2 sentence-level semantics:
+# - A sentence is either FULLY unchanged (black) or FULLY changed (green)
+# - NO token-level diff inside sentences
+# - Eliminates confusing partial highlights
+# =============================================================================
+
+
+def split_sentences(text: str) -> list[str]:
+    """
+    Split text into sentences for V2 sentence-level diff.
+
+    Splits on sentence-ending punctuation (.!?) followed by whitespace.
+
+    Args:
+        text: Text to split into sentences.
+
+    Returns:
+        List of sentence strings.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    # Split on .!? followed by whitespace, keeping the punctuation with the sentence
+    parts = SENT_SPLIT_RE.split(text)
+    # SENT_SPLIT_RE captures the whitespace separator; recombine properly
+    sentences = []
+    current = ""
+    for i, part in enumerate(parts):
+        if i % 2 == 0:  # Content part (sentence)
+            current += part
+        else:  # Separator (whitespace after punctuation)
+            if current.strip():
+                sentences.append(current.strip())
+            current = ""
+    if current.strip():
+        sentences.append(current.strip())
+    return sentences
+
+
+def compute_markers_sentence_level(
+    original_block: str,
+    rewritten_block: str,
+    *,
+    original_sentence_index: set[str],
+) -> str:
+    """
+    V2 Sentence-Level Diff: The core function for simple, predictable highlighting.
+
+    For each sentence in rewritten_block:
+    - If normalized sentence exists in original_sentence_index → UNCHANGED (no markers)
+    - Else → sentence is new/changed → wrap ENTIRE sentence with markers
+
+    NO token-level diff. A sentence is either fully black or fully green.
+
+    Args:
+        original_block: The original block text (used for logging/debugging only in V2).
+        rewritten_block: The rewritten text to process.
+        original_sentence_index: Set of normalized sentences from full original document.
+
+    Returns:
+        Rewritten text with [[[ADD]]]/[[[ENDADD]]] markers around changed sentences.
+    """
+    if not rewritten_block:
+        return ""
+
+    # If no original sentence index provided, everything is new
+    if not original_sentence_index:
+        return f"{MARK_START}{rewritten_block}{MARK_END}"
+
+    # Split rewritten block into sentences
+    sentences = split_sentences(rewritten_block)
+
+    if not sentences:
+        return rewritten_block
+
+    result_parts = []
+    for sentence in sentences:
+        if not sentence.strip():
+            result_parts.append(sentence)
+            continue
+
+        # Normalize the sentence for comparison
+        norm = normalize_sentence(sentence)
+
+        if norm in original_sentence_index:
+            # Sentence is UNCHANGED - no markers
+            result_parts.append(sentence)
+        else:
+            # Sentence is NEW or CHANGED - wrap ENTIRE sentence
+            result_parts.append(f"{MARK_START}{sentence}{MARK_END}")
+
+    # Join with single space
+    result = " ".join(result_parts)
+
+    # Merge adjacent marker blocks for cleaner output
+    result = _merge_adjacent_markers(result)
+
+    return result
+
+
+def _merge_adjacent_markers(text: str) -> str:
+    """
+    Merge adjacent marker blocks separated only by whitespace.
+
+    For example: "[[[ADD]]]foo[[[ENDADD]]] [[[ADD]]]bar[[[ENDADD]]]"
+    becomes:     "[[[ADD]]]foo bar[[[ENDADD]]]"
+
+    Args:
+        text: Text with markers.
+
+    Returns:
+        Text with adjacent markers merged.
+    """
+    if not text or MARK_START not in text:
+        return text
+
+    # Pattern: ENDADD followed by whitespace followed by ADD
+    pattern = rf"{re.escape(MARK_END)}(\s+){re.escape(MARK_START)}"
+    # Replace with just the whitespace (keeps ADD block open)
+    result = re.sub(pattern, r"\1", text)
+
+    return result
+
+
+def compute_markers_v2(
+    original_block: str,
+    rewritten: str,
+    full_original_text: str | None = None,
+) -> str:
+    """
+    V2 Entry Point: Compute sentence-level markers with NO token-level diff.
+
+    This is the V2 replacement for compute_markers().
+
+    Algorithm:
+    1. Build original_sentence_index from full_original_text (or original_block)
+    2. For each sentence in rewritten:
+       - If normalized sentence exists in index → UNCHANGED (black)
+       - Else → CHANGED/NEW → wrap ENTIRE sentence (green)
+
+    Args:
+        original_block: Original text block being compared.
+        rewritten: Rewritten text (plain, no markers).
+        full_original_text: Complete original document text.
+            If provided, sentences matching ANYWHERE in full doc stay black.
+            If None, falls back to original_block.
+
+    Returns:
+        Rewritten text with sentence-level markers.
+    """
+    if not rewritten:
+        return ""
+
+    if not original_block and not full_original_text:
+        # Everything is new
+        return f"{MARK_START}{rewritten}{MARK_END}"
+
+    # Use full_original_text if provided, else original_block
+    full_text = full_original_text if full_original_text else original_block
+
+    # Build the sentence index from the full original text
+    sentence_index = build_original_sentence_index(full_text)
+
+    # Quick check: if entire block is unchanged, skip markers
+    if normalize_sentence(original_block or "") == normalize_sentence(rewritten):
+        return rewritten
+
+    return compute_markers_sentence_level(
+        original_block or "",
+        rewritten,
+        original_sentence_index=sentence_index,
+    )
