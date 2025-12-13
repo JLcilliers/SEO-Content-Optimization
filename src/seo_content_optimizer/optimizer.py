@@ -30,9 +30,10 @@ from .diff_markers import (
     MARK_START as ADD_START,
     compute_markers,
     compute_h1_markers,
-    filter_markers_by_keywords,
     inject_phrase_with_markers,
     mark_block_as_new,
+    # filter_markers_by_keywords is kept in diff_markers.py for potential future
+    # "SEO-only diff" mode, but not used in full diff mode
 )
 from .models import (
     DocxContent,
@@ -307,7 +308,6 @@ class ContentOptimizer:
         meta_elements = []
         primary = keyword_plan.primary.phrase
         secondary = [kw.phrase for kw in keyword_plan.secondary]
-        all_keywords = [primary] + secondary
 
         # Optimize title
         optimized_title_raw = self.llm.optimize_meta_title(
@@ -316,9 +316,9 @@ class ContentOptimizer:
             topic=topic,
             max_length=60,
         )
-        # Use diff-based markers and filter to only keep SEO-relevant changes
-        optimized_title = self._compute_filtered_markers(
-            current_title or "", optimized_title_raw, all_keywords, full_original_text=full_original_text
+        # Full diff mode: highlight ALL changes (no keyword filtering)
+        optimized_title = self._compute_markers_full_diff(
+            current_title or "", optimized_title_raw, full_original_text=full_original_text
         )
         # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in title
         optimized_title = self._ensure_phrase_present(
@@ -340,9 +340,9 @@ class ContentOptimizer:
             topic=topic,
             max_length=160,
         )
-        # Use diff-based markers and filter to only keep SEO-relevant changes
-        optimized_desc = self._compute_filtered_markers(
-            current_meta_desc or "", optimized_desc_raw, all_keywords, full_original_text=full_original_text
+        # Full diff mode: highlight ALL changes (no keyword filtering)
+        optimized_desc = self._compute_markers_full_diff(
+            current_meta_desc or "", optimized_desc_raw, full_original_text=full_original_text
         )
         # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in meta description
         optimized_desc = self._ensure_phrase_present(
@@ -423,32 +423,30 @@ class ContentOptimizer:
         # Phrase is new - add with markers
         return inject_phrase_with_markers(marked_text, phrase, position)
 
-    def _compute_filtered_markers(
+    def _compute_markers_full_diff(
         self,
         original: str,
         optimized: str,
-        keywords: list[str],
         full_original_text: Optional[str] = None,
     ) -> str:
         """
-        Compute diff markers and filter to only keep SEO-relevant changes.
+        Full diff mode: highlight ALL real changes between original and optimized.
 
-        This ensures only changes containing keywords are highlighted, preventing
-        random punctuation or minor word changes from being marked.
+        This implements true track-changes behavior where every real change
+        (new or modified text) is highlighted green, and only unchanged text
+        remains black. Matches the Reading Guide statement:
+        "Text highlighted in green indicates keyword insertions or SEO-focused
+        adjustments. All non-highlighted text remains unchanged from the original."
 
         Args:
             original: Original text.
             optimized: Optimized text (without markers).
-            keywords: List of SEO keywords to filter by.
             full_original_text: Full document text for context.
 
         Returns:
-            Text with markers only around keyword-containing changes.
+            Text with markers around ALL changes (no keyword filtering).
         """
-        # First compute all markers
-        marked_text = compute_markers(original, optimized, full_original_text=full_original_text)
-        # Then filter to only keep markers that contain keywords
-        return filter_markers_by_keywords(marked_text, keywords)
+        return compute_markers(original, optimized, full_original_text=full_original_text)
 
     def _optimize_body_content(
         self,
@@ -464,8 +462,6 @@ class ContentOptimizer:
         optimized_blocks = []
         primary = keyword_plan.primary.phrase
         secondary = [kw.phrase for kw in keyword_plan.secondary]
-        # Build list of keywords for filtering markers
-        all_keywords = [primary] + secondary
 
         # Get content topics for constraints (set during optimize())
         content_topics = getattr(self, '_content_topics', None)
@@ -486,7 +482,6 @@ class ContentOptimizer:
                     secondary,
                     block.heading_level,
                     full_original_text=full_original_text,
-                    all_keywords=all_keywords,
                 )
                 optimized_blocks.append(
                     ParagraphBlock(
@@ -504,9 +499,9 @@ class ContentOptimizer:
                     content_topics=content_topics,
                     brand_context=getattr(self, '_brand_context', None),
                 )
-                # Apply diff-based markers and filter to only keep SEO-relevant changes
-                optimized_text = self._compute_filtered_markers(
-                    block.text, strip_markers(rewritten_text), all_keywords, full_original_text=full_original_text
+                # Full diff mode: highlight ALL changes (no keyword filtering)
+                optimized_text = self._compute_markers_full_diff(
+                    block.text, strip_markers(rewritten_text), full_original_text=full_original_text
                 )
                 optimized_blocks.append(
                     ParagraphBlock(
@@ -532,9 +527,9 @@ class ContentOptimizer:
                         content_topics=content_topics,
                         brand_context=getattr(self, '_brand_context', None),
                     )
-                    # Apply diff-based markers and filter to only keep SEO-relevant changes
-                    optimized_text = self._compute_filtered_markers(
-                        block.text, strip_markers(rewritten_text), all_keywords, full_original_text=full_original_text
+                    # Full diff mode: highlight ALL changes (no keyword filtering)
+                    optimized_text = self._compute_markers_full_diff(
+                        block.text, strip_markers(rewritten_text), full_original_text=full_original_text
                     )
                     optimized_blocks.append(
                         ParagraphBlock(
@@ -556,7 +551,6 @@ class ContentOptimizer:
         secondary: list[str],
         level: HeadingLevel,
         full_original_text: Optional[str] = None,
-        all_keywords: Optional[list[str]] = None,
     ) -> str:
         """Optimize a heading to include keywords where appropriate."""
         text_lower = text.lower()
@@ -592,10 +586,9 @@ Return ONLY the optimized heading text, with no markers or annotations."""
                 messages=[{"role": "user", "content": prompt}],
             )
             rewritten = response.content[0].text.strip()
-            # Apply diff-based markers and filter to only keep SEO-relevant changes
-            keywords = all_keywords or [primary] + secondary
-            return self._compute_filtered_markers(
-                text, strip_markers(rewritten), keywords, full_original_text=full_original_text
+            # Full diff mode: highlight ALL changes (no keyword filtering)
+            return self._compute_markers_full_diff(
+                text, strip_markers(rewritten), full_original_text=full_original_text
             )
         except Exception:
             # On error, return original

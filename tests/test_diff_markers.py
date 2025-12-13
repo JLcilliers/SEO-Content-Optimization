@@ -708,96 +708,6 @@ class TestCellGateRegression:
         assert "entry gates" in clean
 
 
-class TestFilterMarkersByKeywords:
-    """Tests for the filter_markers_by_keywords function."""
-
-    def test_keeps_markers_with_keyword(self):
-        """Markers containing keywords are kept."""
-        text = f"Hello {MARK_START}security cameras{MARK_END} world."
-        keywords = ["security cameras"]
-
-        result = filter_markers_by_keywords(text, keywords)
-
-        assert MARK_START in result
-        assert "security cameras" in result
-
-    def test_removes_markers_without_keyword(self):
-        """Markers without keywords are removed but text is kept."""
-        text = f"Hello {MARK_START}random change{MARK_END} world."
-        keywords = ["security cameras", "access control"]
-
-        result = filter_markers_by_keywords(text, keywords)
-
-        # Markers should be removed
-        assert MARK_START not in result
-        assert MARK_END not in result
-        # But text should remain
-        assert "random change" in result
-        assert result == "Hello random change world."
-
-    def test_mixed_markers_some_kept_some_removed(self):
-        """Some markers kept, others removed based on keywords."""
-        text = f"The {MARK_START}security camera{MARK_END} provides {MARK_START}excellent{MARK_END} monitoring."
-        keywords = ["security camera"]
-
-        result = filter_markers_by_keywords(text, keywords)
-
-        # "security camera" markers kept
-        assert f"{MARK_START}security camera{MARK_END}" in result
-        # "excellent" markers removed
-        assert "excellent" in result
-        assert result.count(MARK_START) == 1
-
-    def test_case_insensitive_matching(self):
-        """Keyword matching is case-insensitive."""
-        text = f"The {MARK_START}Security Cameras{MARK_END} are great."
-        keywords = ["security cameras"]
-
-        result = filter_markers_by_keywords(text, keywords)
-
-        assert MARK_START in result
-
-    def test_no_markers_returns_unchanged(self):
-        """Text without markers is returned unchanged."""
-        text = "Hello world with no markers."
-        keywords = ["security"]
-
-        result = filter_markers_by_keywords(text, keywords)
-
-        assert result == text
-
-    def test_empty_keywords_keeps_all_markers(self):
-        """Empty keyword list keeps all markers."""
-        text = f"Hello {MARK_START}marked{MARK_END} world."
-        keywords = []
-
-        result = filter_markers_by_keywords(text, keywords)
-
-        assert MARK_START in result
-
-    def test_partial_keyword_match(self):
-        """Partial keyword match (keyword as substring) works."""
-        text = f"The {MARK_START}external cameras{MARK_END} work well."
-        keywords = ["camera"]  # Partial match
-
-        result = filter_markers_by_keywords(text, keywords)
-
-        assert MARK_START in result
-
-    def test_cellgate_scenario(self):
-        """Real CellGate scenario: filter non-SEO changes."""
-        # Simulates: "CellGate's" highlighted due to apostrophe but no keyword
-        text = f"The {MARK_START}CellGate's{MARK_END} system provides {MARK_START}external cameras{MARK_END} for security."
-        keywords = ["external cameras", "security cameras", "access control"]
-
-        result = filter_markers_by_keywords(text, keywords)
-
-        # "external cameras" contains keyword - keep markers
-        assert f"{MARK_START}external cameras{MARK_END}" in result
-        # "CellGate's" has no keyword - remove markers
-        assert "CellGate's" in result
-        # Should only have one marker pair
-        assert result.count(MARK_START) == 1
 
 
 class TestCurlyQuoteNormalization:
@@ -867,81 +777,117 @@ class TestCurlyQuoteNormalization:
 
 
 class TestEndToEndPipeline:
-    """End-to-end tests simulating the full optimizer pipeline."""
+    """End-to-end tests simulating the full optimizer pipeline.
 
-    def test_full_pipeline_curly_quotes_filtered(self):
-        """Test the full pipeline: compute_markers + filter_markers_by_keywords."""
+    These tests verify FULL DIFF MODE behavior where ALL real changes
+    are highlighted, not just those containing keywords. This matches
+    the Reading Guide: "Text highlighted in green indicates keyword
+    insertions or SEO-focused adjustments. All non-highlighted text
+    remains unchanged from the original content."
+    """
+
+    def test_full_pipeline_curly_quotes_not_marked(self):
+        """Test that curly quote differences don't create markers (normalization)."""
         # Simulate the optimizer: original has straight quotes, LLM returns curly
         original = "CellGate's external cameras provide property's security."
         rewritten = "CellGate\u2019s external cameras provide property\u2019s security."
 
-        # First compute markers
-        marked = compute_markers(original, rewritten)
+        # Compute markers - in full diff mode, no keyword filtering
+        result = compute_markers(original, rewritten)
 
-        # If any markers exist (shouldn't after normalization fix), filter them
-        keywords = ["external cameras", "security cameras", "property security"]
-        result = filter_markers_by_keywords(marked, keywords)
-
-        # Should have no markers because:
-        # 1. Normalization should prevent curly quote differences from being marked
-        # 2. Even if marked, filter should remove "CellGate's" and "property's"
+        # Should have no markers because normalization treats curly = straight
         assert MARK_START not in result
         assert MARK_END not in result
 
-    def test_full_pipeline_real_change_with_keyword_highlighted(self):
-        """Test that real SEO changes containing keywords are highlighted."""
+    def test_full_pipeline_real_change_highlighted(self):
+        """Test that ALL real changes are highlighted in full diff mode."""
         original = "Our system provides monitoring."
         rewritten = "Our security camera system provides comprehensive monitoring."
 
-        marked = compute_markers(original, rewritten)
-        keywords = ["security camera", "comprehensive monitoring"]
-        result = filter_markers_by_keywords(marked, keywords)
+        # Full diff mode: all changes highlighted
+        result = compute_markers(original, rewritten)
 
-        # Should have markers because real change with keyword
+        # Should have markers because real changes occurred
         assert MARK_START in result
-        # The keyword content should be in the result
+        # The changed content should be in the result
         assert "security camera" in strip_markers(result)
+        assert "comprehensive" in strip_markers(result)
 
-    def test_full_pipeline_change_without_keyword_removed(self):
-        """Test that changes NOT containing keywords have markers removed."""
+    def test_full_pipeline_all_changes_marked_not_just_keywords(self):
+        """Test that changes are highlighted even without keywords (full diff)."""
         original = "The excellent system works well."
         rewritten = "The amazing system works well."
 
-        marked = compute_markers(original, rewritten)
-        keywords = ["security camera", "access control"]
-        result = filter_markers_by_keywords(marked, keywords)
+        # Full diff mode: no keyword filtering
+        result = compute_markers(original, rewritten)
 
-        # "amazing" should NOT be highlighted (no keyword)
-        assert MARK_START not in result
-        assert MARK_END not in result
-        # But text should remain
-        assert "amazing" in result
+        # "amazing" SHOULD be highlighted because it's a real change
+        # This is the key difference from keyword-filtered mode
+        assert MARK_START in result
+        assert MARK_END in result
+        assert "amazing" in strip_markers(result)
 
-    def test_cellgate_real_world_scenario(self):
-        """Comprehensive test of CellGate-like optimization."""
+    def test_cellgate_real_world_scenario_full_diff(self):
+        """Comprehensive test of CellGate-like optimization in full diff mode."""
         # Original content
         original = """When it comes to securing any property, having the right camera system in place is essential. When complex camera, surveillance, and video setups are not necessary for a property, the use of simpler external cameras integrated with an access control or visitor management solution (like CellGate's Entría and/or Watchman lines) can provide the right layer of extra security."""
 
-        # LLM might change some punctuation and add keywords
+        # LLM might change some punctuation and add new content
         rewritten = """When it comes to securing any property, having the right camera system in place is essential. When complex camera, surveillance, and video setups are not necessary for a property, the use of simpler external cameras integrated with an access control or visitor management solution (like CellGate\u2019s Entría and/or Watchman lines) can provide the right layer of extra security for your property security needs."""
 
-        marked = compute_markers(original, rewritten, full_original_text=original)
-        keywords = ["external cameras", "property security", "access control", "camera system"]
-        result = filter_markers_by_keywords(marked, keywords)
+        result = compute_markers(original, rewritten, full_original_text=original)
 
-        # "CellGate's" should NOT be highlighted (curly quote only)
-        # But if new text "for your property security needs" was added, it should be
+        # "CellGate's" should NOT be highlighted (curly quote normalized)
+        # The curly apostrophe change should not trigger markers
         clean = strip_markers(result)
         assert "CellGate" in clean  # Text still present
-        # Check marker count - should only mark new SEO-relevant additions
-        if "property security needs" in rewritten:
-            # If new content added with keyword, it should be marked
-            if MARK_START in result:
-                # Verify the marked content contains a keyword
-                import re
-                marker_pattern = rf"{re.escape(MARK_START)}(.*?){re.escape(MARK_END)}"
-                matches = re.findall(marker_pattern, result)
-                for match in matches:
-                    match_lower = match.lower()
-                    has_keyword = any(kw.lower() in match_lower for kw in keywords)
-                    assert has_keyword, f"Marked content '{match}' has no keyword"
+
+        # New text "for your property security needs" SHOULD be marked (full diff)
+        if "property security needs" in clean:
+            assert MARK_START in result
+            assert "property security needs" in clean
+
+    def test_unchanged_content_no_markers(self):
+        """Verify that truly unchanged content has no markers."""
+        original = "External cameras provide real-time monitoring for your property."
+        rewritten = "External cameras provide real-time monitoring for your property."
+
+        result = compute_markers(original, rewritten)
+
+        # Identical text should have no markers
+        assert MARK_START not in result
+        assert MARK_END not in result
+        assert result == original
+
+
+class TestFilterMarkersByKeywordsStandalone:
+    """Tests for filter_markers_by_keywords function (kept for potential future use).
+
+    Note: This function is no longer used in the main pipeline (full diff mode),
+    but is kept for potential future "SEO-only diff" mode. These tests verify
+    the function still works correctly.
+    """
+
+    def test_filter_keeps_markers_with_keyword(self):
+        """Markers containing keywords are kept."""
+        text = f"Hello {MARK_START}security cameras{MARK_END} world."
+        keywords = ["security cameras"]
+
+        result = filter_markers_by_keywords(text, keywords)
+
+        assert MARK_START in result
+        assert "security cameras" in result
+
+    def test_filter_removes_markers_without_keyword(self):
+        """Markers without keywords are removed but text is kept."""
+        text = f"Hello {MARK_START}random change{MARK_END} world."
+        keywords = ["security cameras", "access control"]
+
+        result = filter_markers_by_keywords(text, keywords)
+
+        # Markers should be removed
+        assert MARK_START not in result
+        assert MARK_END not in result
+        # But text should remain
+        assert "random change" in result
+        assert result == "Hello random change world."
