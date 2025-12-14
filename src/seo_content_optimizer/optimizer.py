@@ -13,12 +13,22 @@ to prevent injection of off-topic industries or spammy content.
 
 from typing import Optional, Union
 
-from .analysis import ContentAnalysis, analyze_content
+from .analysis import (
+    ContentAnalysis,
+    analyze_content,
+    audit_content,
+    build_optimization_plan,
+)
 from .content_sources import convert_page_meta_to_blocks
 from .keyword_filter import (
     filter_keywords_for_content,
     get_content_topics,
     log_filter_results,
+)
+from .output_validator import (
+    validate_and_fallback,
+    validate_faq_items,
+    find_blocked_terms,
 )
 from .llm_client import (
     LLMClient,
@@ -36,6 +46,7 @@ from .diff_markers import (
     normalize_sentence,
 )
 from .models import (
+    ContentAudit,
     DocxContent,
     FAQItem,
     HeadingLevel,
@@ -43,11 +54,71 @@ from .models import (
     KeywordPlan,
     ManualKeywordsConfig,
     MetaElement,
+    OptimizationPlan,
     OptimizationResult,
     PageMeta,
     ParagraphBlock,
 )
 from .prioritizer import create_keyword_plan
+
+
+def ensure_keyword_in_text(text: str, keyword: str, position: str = "start") -> str:
+    """
+    DETERMINISTIC: Ensure exact keyword phrase appears in text.
+
+    If keyword is already present (case-insensitive), return text unchanged.
+    Otherwise, prepend/append the keyword with appropriate formatting.
+
+    This is a PROGRAMMATIC GUARANTEE - if the LLM doesn't include the keyword,
+    we inject it ourselves.
+
+    Args:
+        text: The text to check/modify.
+        keyword: The EXACT keyword phrase that must appear.
+        position: Where to inject if missing - "start" or "end".
+
+    Returns:
+        Text guaranteed to contain the exact keyword phrase.
+    """
+    if not text:
+        return keyword
+
+    # Check if keyword already present (case-insensitive)
+    if keyword.lower() in text.lower():
+        return text
+
+    # Keyword missing - inject it
+    if position == "start":
+        # Prepend keyword with separator
+        return f"{keyword}: {text}"
+    else:
+        # Append keyword
+        if text.rstrip().endswith((".", "!", "?")):
+            # Insert before final punctuation
+            text_stripped = text.rstrip()
+            punct = text_stripped[-1]
+            return f"{text_stripped[:-1]} - {keyword}{punct}"
+        return f"{text} - {keyword}"
+
+
+def count_keyword_in_text(text: str, keyword: str) -> int:
+    """
+    Count occurrences of a keyword phrase in text (case-insensitive).
+
+    Args:
+        text: Text to search in.
+        keyword: Keyword phrase to count.
+
+    Returns:
+        Number of occurrences.
+    """
+    if not text or not keyword:
+        return 0
+    import re
+    # Use word boundary matching for more accurate counts
+    pattern = re.escape(keyword)
+    matches = re.findall(pattern, text, re.IGNORECASE)
+    return len(matches)
 
 
 class ContentOptimizer:
@@ -58,6 +129,11 @@ class ContentOptimizer:
     - Meta element optimization (title, description, H1)
     - Body content optimization
     - FAQ generation
+
+    KEYWORD GUARANTEES:
+    - Primary keyword MUST appear in: Title, Meta Description, H1, first ~100 words of body
+    - Secondary keywords MUST each appear at least once somewhere in the output
+    - These are PROGRAMMATIC guarantees - if LLM fails, we inject keywords ourselves
     """
 
     def __init__(
@@ -184,8 +260,35 @@ class ContentOptimizer:
                 max_questions=faq_count,
             )
 
-        # Store content topics for use in LLM calls
+        # Store content topics and full text for use in LLM calls and validation
         self._content_topics = content_topics
+        self._full_original_text = full_text
+
+        # Step 2.5: Run structured content audit (10-Part SEO Framework)
+        # This identifies keyword placement gaps and prioritizes issues
+        if isinstance(content, PageMeta):
+            content_audit = audit_content(
+                content=content,
+                keyword_plan=keyword_plan,
+                meta_title=content.title,
+                meta_description=content.meta_description,
+            )
+        else:
+            content_audit = audit_content(
+                content=content,
+                keyword_plan=keyword_plan,
+            )
+
+        # Step 2.6: Build optimization plan based on audit
+        # This creates the tiered keyword placement strategy
+        optimization_plan = build_optimization_plan(
+            audit=content_audit,
+            keyword_plan=keyword_plan,
+        )
+
+        # Store audit and plan for use in optimization methods
+        self._content_audit = content_audit
+        self._optimization_plan = optimization_plan
 
         # Step 3: Get current meta elements
         if isinstance(content, PageMeta):
@@ -199,20 +302,22 @@ class ContentOptimizer:
             current_h1 = content.h1
             blocks = content.paragraphs
 
-        # Step 4: Optimize meta elements
+        # Step 4: Optimize meta elements using optimization plan
         meta_elements = self._optimize_meta_elements(
             current_title=current_title,
             current_meta_desc=current_meta_desc,
             current_h1=current_h1,
             keyword_plan=keyword_plan,
+            optimization_plan=optimization_plan,
             topic=analysis.topic,
             full_original_text=full_text,
         )
 
-        # Step 5: Optimize body content
+        # Step 5: Optimize body content using optimization plan
         optimized_blocks = self._optimize_body_content(
             blocks=blocks,
             keyword_plan=keyword_plan,
+            optimization_plan=optimization_plan,
             analysis=analysis,
             full_original_text=full_text,
         )
@@ -231,12 +336,14 @@ class ContentOptimizer:
                 optimized_h1=optimized_h1_text,
             )
 
-        # Step 6: Generate FAQ if requested
+        # Step 6: Generate FAQ if requested (Part 10 of 10-Part Framework)
+        # Uses optimization plan's faq_keywords for targeted keyword integration
         faq_items = []
         if generate_faq:
             faq_items = self._generate_faq(
                 topic=analysis.topic,
                 keyword_plan=keyword_plan,
+                optimization_plan=optimization_plan,
                 num_items=faq_count,
             )
 
@@ -248,12 +355,21 @@ class ContentOptimizer:
             topic=analysis.topic,
         )
 
+        # Step 8: Compute keyword usage counts in final output
+        keyword_usage_counts = self._compute_keyword_usage_counts(
+            meta_elements=meta_elements,
+            optimized_blocks=optimized_blocks,
+            faq_items=faq_items,
+            keyword_plan=keyword_plan,
+        )
+
         return OptimizationResult(
             meta_elements=meta_elements,
             optimized_blocks=optimized_blocks,
             faq_items=faq_items,
             primary_keyword=keyword_plan.primary.phrase,
             secondary_keywords=[kw.phrase for kw in keyword_plan.secondary],
+            keyword_usage_counts=keyword_usage_counts,
         )
 
     def _build_keyword_plan_from_manual(
@@ -266,6 +382,9 @@ class ContentOptimizer:
         This bypasses all automatic keyword selection, filtering, and scoring.
         User-specified keywords are used exactly as provided.
 
+        CRITICAL: The exact phrases provided by the user MUST appear in the final output.
+        No paraphrasing, no splitting, no reordering - the EXACT phrase as typed.
+
         Args:
             manual_keywords: The manual keyword configuration from user input.
 
@@ -273,12 +392,14 @@ class ContentOptimizer:
             KeywordPlan with user-specified keywords.
         """
         # Create primary keyword - never marked as brand, no filtering
+        # IMPORTANT: Store the EXACT phrase as provided (preserve casing/spacing)
         primary = Keyword(
             phrase=manual_keywords.primary.strip(),
             is_brand=False,  # Manual keywords are never treated as brand
         )
 
         # Create secondary keywords from user-provided list
+        # IMPORTANT: Store EXACT phrases as provided
         secondary = [
             Keyword(
                 phrase=phrase.strip(),
@@ -301,29 +422,66 @@ class ContentOptimizer:
         current_meta_desc: Optional[str],
         current_h1: Optional[str],
         keyword_plan: KeywordPlan,
+        optimization_plan: OptimizationPlan,
         topic: str,
         full_original_text: Optional[str] = None,
     ) -> list[MetaElement]:
-        """Optimize title, meta description, and H1."""
+        """
+        Optimize title, meta description, and H1 using the optimization plan.
+
+        KEYWORD GUARANTEE (Part 5 of 10-Part Framework):
+        - Tier 1: Title Tag MUST contain primary keyword
+        - Tier 2: H1 MUST contain primary keyword
+        - Meta Description MUST contain primary keyword for CTR
+
+        This is enforced in two stages:
+        1. Use optimization plan's pre-computed targets as guidance
+        2. Post-processing keyword injection if LLM fails to include
+
+        Args:
+            current_title: Current page title.
+            current_meta_desc: Current meta description.
+            current_h1: Current H1 heading.
+            keyword_plan: The keyword plan.
+            optimization_plan: Pre-computed optimization targets from audit.
+            topic: Content topic.
+            full_original_text: Full document text for validation.
+
+        Returns:
+            List of MetaElement results.
+        """
         meta_elements = []
         primary = keyword_plan.primary.phrase
         secondary = [kw.phrase for kw in keyword_plan.secondary]
 
-        # Optimize title
+        # Use optimization plan targets as guidance for LLM
+        target_title = optimization_plan.target_meta_title
+        target_meta_desc = optimization_plan.target_meta_description
+        target_h1 = optimization_plan.target_h1
+
+        # Optimize title - use target as hint if available
         optimized_title_raw = self.llm.optimize_meta_title(
             current_title=current_title,
             primary_keyword=primary,
             topic=topic,
             max_length=60,
+            target_hint=target_title if target_title else None,
         )
-        # V2: Sentence-level diff (full sentences highlighted, no partial)
-        optimized_title = self._compute_markers_v2(
-            current_title or "", optimized_title_raw, full_original_text=full_original_text
+        # SAFETY: Validate LLM output for blocked industry terms
+        optimized_title_raw, _ = validate_and_fallback(
+            optimized_title_raw, current_title or "", "title"
         )
-        # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in title
-        optimized_title = self._ensure_phrase_present(
-            optimized_title, primary, current_title or "", position="start"
-        )
+        # DETERMINISTIC KEYWORD GUARANTEE: Primary keyword MUST appear (Tier 1)
+        # Do this BEFORE adding markers so the injection is clean
+        optimized_title_raw = ensure_keyword_in_text(optimized_title_raw, primary, position="start")
+
+        # V2: Sentence-level diff - entire element is all-or-nothing
+        # For short elements like titles, if changed at all, wrap entire thing
+        if normalize_sentence(current_title or "") != normalize_sentence(optimized_title_raw):
+            optimized_title = f"{ADD_START}{optimized_title_raw}{ADD_END}"
+        else:
+            optimized_title = optimized_title_raw
+
         meta_elements.append(
             MetaElement(
                 element_name="Title Tag",
@@ -333,21 +491,27 @@ class ContentOptimizer:
             )
         )
 
-        # Optimize meta description
+        # Optimize meta description - use target as hint if available
         optimized_desc_raw = self.llm.optimize_meta_description(
             current_description=current_meta_desc,
             primary_keyword=primary,
             topic=topic,
             max_length=160,
+            target_hint=target_meta_desc if target_meta_desc else None,
         )
-        # V2: Sentence-level diff (full sentences highlighted, no partial)
-        optimized_desc = self._compute_markers_v2(
-            current_meta_desc or "", optimized_desc_raw, full_original_text=full_original_text
+        # SAFETY: Validate LLM output for blocked industry terms
+        optimized_desc_raw, _ = validate_and_fallback(
+            optimized_desc_raw, current_meta_desc or "", "meta_description"
         )
-        # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in meta description
-        optimized_desc = self._ensure_phrase_present(
-            optimized_desc, primary, current_meta_desc or "", position="start"
-        )
+        # DETERMINISTIC KEYWORD GUARANTEE: Primary keyword MUST appear
+        optimized_desc_raw = ensure_keyword_in_text(optimized_desc_raw, primary, position="start")
+
+        # V2: Sentence-level diff - entire element is all-or-nothing for meta desc
+        if normalize_sentence(current_meta_desc or "") != normalize_sentence(optimized_desc_raw):
+            optimized_desc = f"{ADD_START}{optimized_desc_raw}{ADD_END}"
+        else:
+            optimized_desc = optimized_desc_raw
+
         meta_elements.append(
             MetaElement(
                 element_name="Meta Description",
@@ -357,21 +521,26 @@ class ContentOptimizer:
             )
         )
 
-        # Optimize H1
+        # Optimize H1 (Tier 2) - use target as hint if available
         clean_title = strip_markers(optimized_title)
         optimized_h1_raw = self.llm.optimize_h1(
             current_h1=current_h1,
             primary_keyword=primary,
             title=clean_title,
             topic=topic,
+            target_hint=target_h1 if target_h1 else None,
         )
+        # SAFETY: Validate LLM output for blocked industry terms
+        optimized_h1_raw, _ = validate_and_fallback(
+            optimized_h1_raw, current_h1 or "", "h1"
+        )
+        # DETERMINISTIC KEYWORD GUARANTEE: Primary keyword MUST appear (Tier 2)
+        optimized_h1_raw = ensure_keyword_in_text(optimized_h1_raw, primary, position="start")
+
         # Use special H1 marker handling:
         # If H1 changed at all, wrap ENTIRE H1 in markers (not just changed phrases)
         optimized_h1 = compute_h1_markers(current_h1 or "", optimized_h1_raw)
-        # PROGRAMMATIC GUARANTEE: Primary keyword MUST appear in H1
-        optimized_h1 = self._ensure_phrase_present(
-            optimized_h1, primary, current_h1 or "", position="start"
-        )
+
         meta_elements.append(
             MetaElement(
                 element_name="H1",
@@ -382,46 +551,6 @@ class ContentOptimizer:
         )
 
         return meta_elements
-
-    def _ensure_phrase_present(
-        self,
-        marked_text: str,
-        phrase: str,
-        original_text: str,
-        position: str = "start",
-    ) -> str:
-        """
-        Ensure the phrase is present in marked text.
-
-        If the phrase already exists in the original, it should be unmarked.
-        If the phrase is added, it should be marked.
-
-        Args:
-            marked_text: Text with diff markers.
-            phrase: Phrase to ensure is present.
-            original_text: Original text before optimization.
-            position: Where to inject if missing - "start" or "end".
-
-        Returns:
-            Text with phrase guaranteed to be present.
-        """
-        # Check if phrase is already present (case-insensitive)
-        clean_text = strip_markers(marked_text)
-        if phrase.lower() in clean_text.lower():
-            return marked_text  # Already present
-
-        # Check if phrase was in original (shouldn't mark if it was)
-        if phrase.lower() in original_text.lower():
-            # Phrase was in original but somehow removed - add it back unmarked
-            if position == "start":
-                return f"{phrase}: {marked_text}"
-            else:
-                if marked_text.endswith("."):
-                    return f"{marked_text[:-1]} - {phrase}."
-                return f"{marked_text} | {phrase}"
-
-        # Phrase is new - add with markers
-        return inject_phrase_with_markers(marked_text, phrase, position)
 
     def _compute_markers_v2(
         self,
@@ -457,10 +586,31 @@ class ContentOptimizer:
         self,
         blocks: list[ParagraphBlock],
         keyword_plan: KeywordPlan,
+        optimization_plan: OptimizationPlan,
         analysis: ContentAnalysis,
         full_original_text: Optional[str] = None,
     ) -> list[ParagraphBlock]:
-        """Optimize body content blocks."""
+        """
+        Optimize body content blocks using the optimization plan.
+
+        KEYWORD GUARANTEES (Part 5 of 10-Part Framework):
+        - Tier 3: Primary keyword MUST appear in first ~100 words
+        - Tier 4: Keywords should appear in subheadings (H2/H3)
+        - Tier 5: Keywords distributed throughout body
+        - Tier 7: Keywords in conclusion
+
+        Uses the optimization plan's placement_plan to guide keyword distribution.
+
+        Args:
+            blocks: Content blocks to optimize.
+            keyword_plan: The keyword plan.
+            optimization_plan: Pre-computed optimization targets and placement strategy.
+            analysis: Content analysis results.
+            full_original_text: Full document for diff comparison.
+
+        Returns:
+            Optimized content blocks with markers.
+        """
         if not blocks:
             return []
 
@@ -471,20 +621,35 @@ class ContentOptimizer:
         # Get content topics for constraints (set during optimize())
         content_topics = getattr(self, '_content_topics', None)
 
+        # Get placement plan from optimization plan for tiered keyword distribution
+        placement_plan = optimization_plan.placement_plan
+        subheading_keywords = placement_plan.subheadings if placement_plan else secondary[:2]
+        body_keywords = placement_plan.body_priority if placement_plan else [primary] + secondary
+
+        # Track which keywords have been placed in body
+        keywords_placed_in_body = set()
+
+        # Identify the conclusion block (last non-heading paragraph)
+        conclusion_index = -1
+        for i in range(len(blocks) - 1, -1, -1):
+            if not blocks[i].is_heading and len(blocks[i].text) > 50:
+                conclusion_index = i
+                break
+
         # Determine which blocks to optimize
-        # Focus on: first paragraph, headings, and a few body paragraphs
         for i, block in enumerate(blocks):
             if block.heading_level == HeadingLevel.H1:
                 # H1 is handled separately in meta elements
                 optimized_blocks.append(block)
                 continue
 
-            # Optimize headings (H2-H6)
+            # Optimize headings (H2-H6) - Tier 4 placement
             if block.is_heading:
+                # Use subheading keywords from placement plan
                 optimized_text = self._optimize_heading(
                     block.text,
                     primary,
-                    secondary,
+                    subheading_keywords,
                     block.heading_level,
                     full_original_text=full_original_text,
                 )
@@ -495,18 +660,57 @@ class ContentOptimizer:
                         style_name=block.style_name,
                     )
                 )
-            elif i < 3:  # First few paragraphs get full optimization
+            elif i < 3:  # First few paragraphs get full optimization (Tier 3 & 5)
+                # For first paragraph, emphasize primary keyword (Tier 3)
+                para_keywords = [primary] + secondary[:2] if i == 0 else secondary[:3]
                 rewritten_text = self.llm.rewrite_with_markers(
                     content=block.text,
                     primary_keyword=primary,
-                    secondary_keywords=secondary[:3],
-                    context=f"This is paragraph {i+1} of the content about {analysis.topic}.",
+                    secondary_keywords=para_keywords,
+                    context=f"This is paragraph {i+1} of the content about {analysis.topic}. "
+                           f"{'Ensure the primary keyword appears early in this paragraph.' if i == 0 else ''}",
                     content_topics=content_topics,
                     brand_context=getattr(self, '_brand_context', None),
                 )
+                # SAFETY: Validate LLM output for blocked industry terms
+                rewritten_text, _ = validate_and_fallback(
+                    strip_markers(rewritten_text), block.text, f"paragraph_{i+1}"
+                )
                 # V2: Sentence-level diff (full sentences highlighted, no partial)
                 optimized_text = self._compute_markers_v2(
-                    block.text, strip_markers(rewritten_text), full_original_text=full_original_text
+                    block.text, rewritten_text, full_original_text=full_original_text
+                )
+
+                # Track placed keywords
+                for kw in [primary] + secondary:
+                    if kw.lower() in optimized_text.lower():
+                        keywords_placed_in_body.add(kw.lower())
+
+                optimized_blocks.append(
+                    ParagraphBlock(
+                        text=optimized_text,
+                        heading_level=block.heading_level,
+                        style_name=block.style_name,
+                    )
+                )
+            elif i == conclusion_index:
+                # Conclusion paragraph - Tier 7 placement
+                conclusion_keywords = placement_plan.conclusion if placement_plan else [primary]
+                rewritten_text = self.llm.rewrite_with_markers(
+                    content=block.text,
+                    primary_keyword=primary,
+                    secondary_keywords=conclusion_keywords,
+                    context=f"This is the conclusion paragraph. Ensure it reinforces the main topic about {analysis.topic}.",
+                    content_topics=content_topics,
+                    brand_context=getattr(self, '_brand_context', None),
+                )
+                # SAFETY: Validate LLM output for blocked industry terms
+                rewritten_text, _ = validate_and_fallback(
+                    strip_markers(rewritten_text), block.text, "conclusion"
+                )
+                # V2: Sentence-level diff (full sentences highlighted, no partial)
+                optimized_text = self._compute_markers_v2(
+                    block.text, rewritten_text, full_original_text=full_original_text
                 )
                 optimized_blocks.append(
                     ParagraphBlock(
@@ -516,26 +720,43 @@ class ContentOptimizer:
                     )
                 )
             else:
-                # Later paragraphs: lighter optimization
+                # Body paragraphs - Tier 5 placement
                 # Check if already contains keywords
                 text_lower = block.text.lower()
                 has_primary = primary.lower() in text_lower
                 has_secondary = any(kw.lower() in text_lower for kw in secondary)
 
-                if not has_primary and not has_secondary and len(block.text) > 100:
+                # Find keywords that still need placement
+                unplaced_keywords = [
+                    kw for kw in body_keywords
+                    if kw.lower() not in keywords_placed_in_body
+                ][:2]
+
+                if (not has_primary and not has_secondary and len(block.text) > 100) or unplaced_keywords:
                     # Optimize to add keywords
+                    keywords_to_add = unplaced_keywords if unplaced_keywords else secondary[:2]
                     rewritten_text = self.llm.rewrite_with_markers(
                         content=block.text,
-                        primary_keyword=primary,
-                        secondary_keywords=secondary[:2],
-                        context="Lightly optimize this paragraph to include relevant keywords.",
+                        primary_keyword=primary if primary.lower() not in keywords_placed_in_body else keywords_to_add[0] if keywords_to_add else primary,
+                        secondary_keywords=keywords_to_add,
+                        context="Optimize this paragraph to naturally include relevant keywords.",
                         content_topics=content_topics,
                         brand_context=getattr(self, '_brand_context', None),
                     )
+                    # SAFETY: Validate LLM output for blocked industry terms
+                    rewritten_text, _ = validate_and_fallback(
+                        strip_markers(rewritten_text), block.text, f"paragraph_{i+1}"
+                    )
                     # V2: Sentence-level diff (full sentences highlighted, no partial)
                     optimized_text = self._compute_markers_v2(
-                        block.text, strip_markers(rewritten_text), full_original_text=full_original_text
+                        block.text, rewritten_text, full_original_text=full_original_text
                     )
+
+                    # Track placed keywords
+                    for kw in [primary] + secondary:
+                        if kw.lower() in optimized_text.lower():
+                            keywords_placed_in_body.add(kw.lower())
+
                     optimized_blocks.append(
                         ParagraphBlock(
                             text=optimized_text,
@@ -544,10 +765,87 @@ class ContentOptimizer:
                         )
                     )
                 else:
-                    # Keep as-is
+                    # Keep as-is but track any keywords present
+                    for kw in [primary] + secondary:
+                        if kw.lower() in text_lower:
+                            keywords_placed_in_body.add(kw.lower())
                     optimized_blocks.append(block)
 
+        # KEYWORD GUARANTEE (Tier 3): Ensure primary keyword is in first ~100 words
+        optimized_blocks = self._ensure_primary_in_first_100_words(
+            optimized_blocks, primary, analysis.topic
+        )
+
         return optimized_blocks
+
+    def _ensure_primary_in_first_100_words(
+        self,
+        blocks: list[ParagraphBlock],
+        primary: str,
+        topic: str,
+    ) -> list[ParagraphBlock]:
+        """
+        Ensure primary keyword appears in the first ~100 words of body content.
+
+        If not present, inject an intro sentence containing the primary keyword.
+
+        Args:
+            blocks: The optimized content blocks.
+            primary: The primary keyword phrase.
+            topic: The content topic.
+
+        Returns:
+            Updated blocks with primary keyword guaranteed in first 100 words.
+        """
+        # Collect first 100 words from body blocks (skip H1)
+        words_collected = []
+        for block in blocks:
+            if block.heading_level == HeadingLevel.H1:
+                continue
+            block_text = strip_markers(block.text)
+            block_words = block_text.split()
+            words_collected.extend(block_words)
+            if len(words_collected) >= 100:
+                break
+
+        first_100_words = " ".join(words_collected[:100]).lower()
+
+        # Check if primary keyword is in first 100 words
+        if primary.lower() in first_100_words:
+            return blocks  # Already present
+
+        # Primary keyword missing from first 100 words - inject intro sentence
+        intro_sentence = f"This guide covers everything you need to know about {primary}."
+
+        # Find the first non-H1 body block and prepend the intro
+        result_blocks = []
+        intro_added = False
+
+        for i, block in enumerate(blocks):
+            if block.heading_level == HeadingLevel.H1:
+                result_blocks.append(block)
+                continue
+
+            if not intro_added and not block.is_heading:
+                # Add intro paragraph before this block
+                intro_block = ParagraphBlock(
+                    text=f"{ADD_START}{intro_sentence}{ADD_END}",
+                    heading_level=HeadingLevel.BODY,
+                )
+                result_blocks.append(intro_block)
+                intro_added = True
+
+            result_blocks.append(block)
+
+        # If we couldn't find a good place, add at the end
+        if not intro_added:
+            intro_block = ParagraphBlock(
+                text=f"{ADD_START}{intro_sentence}{ADD_END}",
+                heading_level=HeadingLevel.BODY,
+            )
+            result_blocks.append(intro_block)
+
+        return result_blocks
 
     def _optimize_heading(
         self,
@@ -591,9 +889,13 @@ Return ONLY the optimized heading text, with no markers or annotations."""
                 messages=[{"role": "user", "content": prompt}],
             )
             rewritten = response.content[0].text.strip()
+            # SAFETY: Validate LLM output for blocked industry terms
+            rewritten, _ = validate_and_fallback(
+                strip_markers(rewritten), text, "heading"
+            )
             # V2: Sentence-level diff (full sentences highlighted, no partial)
             return self._compute_markers_v2(
-                text, strip_markers(rewritten), full_original_text=full_original_text
+                text, rewritten, full_original_text=full_original_text
             )
         except Exception:
             # On error, return original
@@ -737,6 +1039,9 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
             )
             result = response.content[0].text.strip()
 
+            # Get original content for validation
+            full_original_text = getattr(self, '_full_original_text', "")
+
             # Split into sentences and filter
             sentences = []
             for sentence in result.replace("\n", " ").split(". "):
@@ -744,7 +1049,10 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
                 if sentence and not sentence.startswith("-") and not sentence[0].isdigit():
                     if not sentence.endswith("."):
                         sentence += "."
-                    sentences.append(sentence)
+                    # SAFETY: Validate each sentence for blocked terms
+                    validated, _ = validate_and_fallback(sentence, full_original_text, "fallback_sentence")
+                    if validated == sentence:  # Only include if validation passed
+                        sentences.append(sentence)
 
             return sentences
         except Exception:
@@ -758,22 +1066,57 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
         self,
         topic: str,
         keyword_plan: KeywordPlan,
+        optimization_plan: OptimizationPlan,
         num_items: int,
     ) -> list[FAQItem]:
-        """Generate FAQ items."""
+        """
+        Generate FAQ items using the optimization plan.
+
+        Part 10 of 10-Part Framework: FAQ generation for featured snippets.
+        Uses plan.placement_plan.faq_keywords to guide keyword integration.
+
+        Args:
+            topic: Content topic.
+            keyword_plan: The keyword plan.
+            optimization_plan: Optimization plan with faq_keywords.
+            num_items: Number of FAQ items to generate.
+
+        Returns:
+            List of FAQItem with markers (100% green - all new content).
+        """
         # Get content topics for constraints (set during optimize())
         content_topics = getattr(self, '_content_topics', None)
         brand_context = getattr(self, '_brand_context', None)
+        full_original_text = getattr(self, '_full_original_text', "")
+
+        # Use faq_keywords from placement plan if available
+        faq_keywords = []
+        if optimization_plan.placement_plan and optimization_plan.placement_plan.faq_keywords:
+            faq_keywords = optimization_plan.placement_plan.faq_keywords
+        else:
+            # Fallback to keyword plan keywords
+            faq_keywords = [kw.phrase for kw in keyword_plan.secondary[:2]]
+            if keyword_plan.long_tail_questions:
+                faq_keywords.extend([kw.phrase for kw in keyword_plan.long_tail_questions[:2]])
+
+        # Use planned FAQ questions if available from audit
+        planned_questions = optimization_plan.faq_questions if optimization_plan.faq_questions else []
 
         faq_data = self.llm.generate_faq_items(
             topic=topic,
             primary_keyword=keyword_plan.primary.phrase,
             secondary_keywords=[kw.phrase for kw in keyword_plan.secondary],
             question_keywords=[kw.phrase for kw in keyword_plan.long_tail_questions],
+            faq_keywords=faq_keywords,
+            planned_questions=planned_questions,
             num_items=num_items,
             content_topics=content_topics,
             brand_context=brand_context,
         )
+
+        # SAFETY: Validate FAQ items for blocked industry terms
+        # Filter out any FAQs that introduce off-topic industries
+        valid_faqs, _ = validate_faq_items(faq_data, full_original_text)
 
         # Wrap FAQ items in markers - all FAQ content is new and should be highlighted
         return [
@@ -781,7 +1124,7 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
                 question=mark_block_as_new(item["question"]),
                 answer=mark_block_as_new(item["answer"])
             )
-            for item in faq_data
+            for item in valid_faqs
         ]
 
     def _explain_title_change(
@@ -863,6 +1206,62 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
             reasons.append("Optimized for SEO while maintaining clarity")
 
         return "; ".join(reasons)
+
+    def _compute_keyword_usage_counts(
+        self,
+        meta_elements: list[MetaElement],
+        optimized_blocks: list[ParagraphBlock],
+        faq_items: list[FAQItem],
+        keyword_plan: KeywordPlan,
+    ) -> dict[str, int]:
+        """
+        Compute keyword usage counts across all final optimized content.
+
+        Counts each keyword occurrence in:
+        - Meta elements (title, description, H1)
+        - Body content blocks
+        - FAQ items
+
+        Args:
+            meta_elements: The optimized meta elements.
+            optimized_blocks: The optimized content blocks.
+            faq_items: The generated FAQ items.
+            keyword_plan: The keyword plan with primary and secondary keywords.
+
+        Returns:
+            Dictionary mapping keyword phrase to occurrence count.
+        """
+        # Build full text from all optimized content (strip markers for counting)
+        text_parts = []
+
+        # Add meta elements
+        for meta in meta_elements:
+            text_parts.append(strip_markers(meta.optimized))
+
+        # Add body content
+        for block in optimized_blocks:
+            text_parts.append(strip_markers(block.text))
+
+        # Add FAQ content
+        for faq in faq_items:
+            text_parts.append(strip_markers(faq.question))
+            text_parts.append(strip_markers(faq.answer))
+
+        full_text = " ".join(text_parts)
+
+        # Count each keyword
+        counts = {}
+
+        # Count primary keyword
+        counts[keyword_plan.primary.phrase] = count_keyword_in_text(
+            full_text, keyword_plan.primary.phrase
+        )
+
+        # Count secondary keywords
+        for kw in keyword_plan.secondary:
+            counts[kw.phrase] = count_keyword_in_text(full_text, kw.phrase)
+
+        return counts
 
     def _detect_brand_name(
         self,

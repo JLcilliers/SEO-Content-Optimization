@@ -13,11 +13,16 @@ from typing import Optional, Union
 
 from .models import (
     ContentAnalysis,
+    ContentAudit,
     ContentIntent,
     DocxContent,
     HeadingLevel,
     Keyword,
+    KeywordPlan,
+    KeywordPlacementPlan,
+    KeywordPlacementStatus,
     KeywordUsageStats,
+    OptimizationPlan,
     PageMeta,
     ParagraphBlock,
 )
@@ -503,3 +508,511 @@ def mark_branded_keywords(
             kw.is_brand = True
 
     return keywords
+
+
+# =============================================================================
+# 10-Part SEO Framework: Content Audit (Parts 1-4 & 6)
+# =============================================================================
+
+def audit_content(
+    content: Union[PageMeta, DocxContent],
+    keyword_plan: KeywordPlan,
+    meta_title: Optional[str] = None,
+    meta_description: Optional[str] = None,
+) -> ContentAudit:
+    """
+    Perform a comprehensive content audit following the 10-part SEO framework.
+
+    This implements Parts 1-4 & 6 of the framework:
+    - Part 1: Understand what search engines (and readers) want
+    - Part 2: Identify target keywords
+    - Part 3: Audit current state
+    - Part 4: Identify gaps
+    - Part 6: Research/competitive context
+
+    Args:
+        content: PageMeta or DocxContent to audit.
+        keyword_plan: The KeywordPlan with primary, secondary, and long-tail keywords.
+        meta_title: Current meta title (if available separately from content).
+        meta_description: Current meta description (if available separately).
+
+    Returns:
+        ContentAudit with comprehensive analysis results.
+    """
+    # Extract content details
+    if isinstance(content, PageMeta):
+        full_text = content.full_text
+        h1 = content.h1
+        title = meta_title or content.title
+        meta_desc = meta_description or content.meta_description
+        blocks = content.content_blocks
+        headings = _extract_headings_from_page_meta(content)
+    else:
+        full_text = content.full_text
+        h1 = content.h1
+        title = meta_title
+        meta_desc = meta_description
+        blocks = [p.text for p in content.paragraphs]
+        headings = [p.text for p in content.headings]
+
+    # Basic stats
+    word_count = len(full_text.split())
+
+    # Detect topic and intent
+    topic = _detect_topic(title, h1, blocks)
+    intent = _detect_intent(full_text, title, h1)
+    topic_summary = _create_topic_summary(topic, intent, word_count)
+
+    # Build heading outline
+    heading_outline = _build_heading_outline(headings, h1)
+
+    # Analyze keyword placement for all keywords
+    keyword_status = _analyze_keyword_placements(
+        keyword_plan=keyword_plan,
+        full_text=full_text,
+        title=title,
+        meta_description=meta_desc,
+        h1=h1,
+        headings=headings,
+    )
+
+    # Identify gaps
+    depth_gaps = _identify_depth_gaps(full_text, keyword_plan, topic)
+    structural_gaps = _identify_structural_gaps(content, headings, full_text)
+    format_opportunities = _identify_format_opportunities(content, full_text)
+    technical_opportunities = _identify_technical_opportunities(content)
+
+    # Prioritize issues
+    high_priority, medium_priority, standard_priority = _prioritize_issues(
+        keyword_status=keyword_status,
+        structural_gaps=structural_gaps,
+        depth_gaps=depth_gaps,
+        format_opportunities=format_opportunities,
+        technical_opportunities=technical_opportunities,
+    )
+
+    return ContentAudit(
+        topic_summary=topic_summary,
+        intent=intent.value,
+        word_count=word_count,
+        current_meta_title=title,
+        current_meta_description=meta_desc,
+        current_h1=h1,
+        heading_outline=heading_outline,
+        keyword_status=keyword_status,
+        depth_gaps=depth_gaps,
+        structural_gaps=structural_gaps,
+        format_opportunities=format_opportunities,
+        technical_opportunities=technical_opportunities,
+        high_priority_issues=high_priority,
+        medium_priority_issues=medium_priority,
+        standard_priority_issues=standard_priority,
+    )
+
+
+def _create_topic_summary(topic: str, intent: ContentIntent, word_count: int) -> str:
+    """Create a 1-2 sentence summary of what the content is about."""
+    intent_label = intent.value
+    return f"Content about '{topic}' with {intent_label} intent ({word_count} words)."
+
+
+def _extract_headings_from_page_meta(content: PageMeta) -> list[str]:
+    """Extract headings from PageMeta structured blocks if available."""
+    headings = []
+    if content.has_structured_content:
+        from .models import ContentBlockType
+        for block in content.structured_blocks:
+            if block.block_type == ContentBlockType.HEADING and block.paragraph:
+                headings.append(block.paragraph.text)
+    return headings
+
+
+def _build_heading_outline(headings: list[str], h1: Optional[str]) -> list[str]:
+    """Build a heading outline list with H1 first, then subheadings."""
+    outline = []
+    if h1:
+        outline.append(f"H1: {h1}")
+    for heading in headings:
+        # Skip if this is the H1 (already added)
+        if h1 and heading.strip() == h1.strip():
+            continue
+        outline.append(f"H2/H3: {heading}")
+    return outline
+
+
+def _analyze_keyword_placements(
+    keyword_plan: KeywordPlan,
+    full_text: str,
+    title: Optional[str],
+    meta_description: Optional[str],
+    h1: Optional[str],
+    headings: list[str],
+) -> list[KeywordPlacementStatus]:
+    """
+    Analyze where each keyword appears in the content.
+
+    Checks placement in all tiers of the hierarchy:
+    - Tier 1: Title Tag
+    - Tier 2: H1
+    - Tier 3: First 100 words
+    - Tier 4: Subheadings (H2/H3)
+    - Tier 5: Body content
+    - Tier 7: Conclusion (last paragraph)
+    """
+    placements = []
+
+    # Get all keywords from the plan
+    all_keywords = keyword_plan.all_keywords
+
+    # Extract first 100 words and conclusion
+    words = full_text.split()
+    first_100_words = " ".join(words[:100])
+    conclusion = _extract_conclusion(full_text)
+
+    for kw in all_keywords:
+        phrase = kw.phrase
+        phrase_lower = phrase.lower()
+        pattern = re.compile(re.escape(phrase_lower), re.IGNORECASE)
+
+        # Check each placement location
+        in_title = bool(title and pattern.search(title))
+        in_meta_desc = bool(meta_description and pattern.search(meta_description))
+        in_h1 = bool(h1 and pattern.search(h1))
+        in_first_100 = bool(pattern.search(first_100_words))
+
+        # Check subheadings
+        in_subheadings = False
+        for heading in headings:
+            if pattern.search(heading):
+                in_subheadings = True
+                break
+
+        # Check body (total count)
+        body_count = len(pattern.findall(full_text))
+        in_body = body_count > 0
+
+        # Check conclusion
+        in_conclusion = bool(pattern.search(conclusion))
+
+        placements.append(KeywordPlacementStatus(
+            keyword=phrase,
+            in_title=in_title,
+            in_meta_description=in_meta_desc,
+            in_h1=in_h1,
+            in_first_100_words=in_first_100,
+            in_subheadings=in_subheadings,
+            in_body=in_body,
+            in_conclusion=in_conclusion,
+            body_count=body_count,
+        ))
+
+    return placements
+
+
+def _extract_conclusion(full_text: str) -> str:
+    """Extract the last paragraph/conclusion of the content."""
+    paragraphs = [p.strip() for p in full_text.split("\n\n") if p.strip()]
+    if paragraphs:
+        # Return last substantial paragraph (at least 50 chars)
+        for para in reversed(paragraphs):
+            if len(para) >= 50:
+                return para
+        # If all are short, just return the last one
+        return paragraphs[-1]
+    return ""
+
+
+def _identify_depth_gaps(
+    full_text: str,
+    keyword_plan: KeywordPlan,
+    topic: str,
+) -> list[str]:
+    """
+    Identify missing subtopics that searchers would expect.
+
+    This analyzes the content to find gaps in topic coverage.
+    """
+    gaps = []
+    text_lower = full_text.lower()
+
+    # Check if long-tail question keywords are addressed
+    for kw in keyword_plan.long_tail_questions:
+        if kw.phrase.lower() not in text_lower:
+            # Check if the question topic is addressed even if exact phrase isn't
+            question_words = set(kw.phrase.lower().split())
+            # Remove common question words
+            question_words -= {"how", "what", "why", "when", "where", "which", "can", "does", "is", "are", "to", "do"}
+            significant_words = [w for w in question_words if len(w) > 3]
+            if significant_words:
+                matches = sum(1 for w in significant_words if w in text_lower)
+                if matches < len(significant_words) * 0.5:
+                    gaps.append(f"Missing coverage: {kw.phrase}")
+
+    # Check for common expected subtopics based on intent
+    if "guide" in topic.lower() or "how" in topic.lower():
+        if "step" not in text_lower and "steps" not in text_lower:
+            gaps.append("Consider adding step-by-step instructions")
+        if "example" not in text_lower and "examples" not in text_lower:
+            gaps.append("Consider adding practical examples")
+
+    if "vs" in topic.lower() or "comparison" in topic.lower():
+        if "pros" not in text_lower and "cons" not in text_lower:
+            gaps.append("Consider adding pros and cons comparison")
+
+    return gaps[:5]  # Limit to top 5 gaps
+
+
+def _identify_structural_gaps(
+    content: Union[PageMeta, DocxContent],
+    headings: list[str],
+    full_text: str,
+) -> list[str]:
+    """Identify structural issues like missing FAQ, conclusion, etc."""
+    gaps = []
+    text_lower = full_text.lower()
+
+    # Check for FAQ section
+    has_faq = any("faq" in h.lower() or "question" in h.lower() for h in headings)
+    has_faq = has_faq or "frequently asked" in text_lower
+    if not has_faq:
+        gaps.append("No FAQ section detected")
+
+    # Check for clear conclusion
+    conclusion_indicators = ["conclusion", "summary", "final thoughts", "in conclusion", "to summarize"]
+    has_conclusion = any(ind in text_lower for ind in conclusion_indicators)
+    if not has_conclusion:
+        gaps.append("No clear conclusion section")
+
+    # Check heading structure
+    if len(headings) < 3:
+        gaps.append("Content has few subheadings - consider adding more H2/H3 structure")
+
+    # Check for introduction
+    intro_indicators = ["introduction", "overview", "in this article", "in this guide"]
+    has_intro = any(ind in text_lower[:500] for ind in intro_indicators)
+    if not has_intro and len(full_text) > 1000:
+        gaps.append("Consider adding a clear introduction")
+
+    return gaps
+
+
+def _identify_format_opportunities(
+    content: Union[PageMeta, DocxContent],
+    full_text: str,
+) -> list[str]:
+    """Identify opportunities to add structured formats like tables, lists."""
+    opportunities = []
+    text_lower = full_text.lower()
+
+    # Check for comparison content that could use a table
+    if "vs" in text_lower or "comparison" in text_lower or "compare" in text_lower:
+        # Check if there's already a table (rough heuristic)
+        if isinstance(content, PageMeta) and content.has_structured_content:
+            from .models import ContentBlockType
+            has_table = any(b.block_type == ContentBlockType.TABLE for b in content.structured_blocks)
+            if not has_table:
+                opportunities.append("Add comparison table for key differences")
+        else:
+            opportunities.append("Consider adding comparison table")
+
+    # Check for list content that could be formatted
+    list_indicators = ["features:", "benefits:", "advantages:", "includes:"]
+    for indicator in list_indicators:
+        if indicator in text_lower:
+            opportunities.append(f"Content after '{indicator[:-1]}' could be formatted as bullet list")
+            break
+
+    # Check for pricing/spec content that could use a table
+    if "price" in text_lower or "pricing" in text_lower or "cost" in text_lower:
+        opportunities.append("Consider adding pricing comparison table")
+
+    return opportunities[:3]  # Limit to top 3
+
+
+def _identify_technical_opportunities(
+    content: Union[PageMeta, DocxContent],
+) -> list[str]:
+    """Identify technical SEO opportunities like schema, internal links."""
+    opportunities = []
+
+    # Always recommend FAQ schema for FAQ sections
+    opportunities.append("Add FAQ schema markup for rich results")
+
+    # Recommend internal links
+    opportunities.append("Review internal linking opportunities")
+
+    # For web content, check meta
+    if isinstance(content, PageMeta):
+        if not content.meta_description:
+            opportunities.append("Add meta description")
+        if not content.title:
+            opportunities.append("Add title tag")
+
+    return opportunities
+
+
+def _prioritize_issues(
+    keyword_status: list[KeywordPlacementStatus],
+    structural_gaps: list[str],
+    depth_gaps: list[str],
+    format_opportunities: list[str],
+    technical_opportunities: list[str],
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    Prioritize issues into high, medium, and standard categories.
+
+    High priority (Part 9): Meta/H1/keyword presence issues
+    Medium priority: Content depth gaps
+    Standard priority: Technical polish items
+    """
+    high_priority = []
+    medium_priority = []
+    standard_priority = []
+
+    # Primary keyword placement issues are high priority
+    if keyword_status:
+        primary = keyword_status[0]
+        if not primary.in_title:
+            high_priority.append(f"Primary keyword '{primary.keyword}' missing from title tag")
+        if not primary.in_h1:
+            high_priority.append(f"Primary keyword '{primary.keyword}' missing from H1")
+        if not primary.in_first_100_words:
+            high_priority.append(f"Primary keyword '{primary.keyword}' missing from first 100 words")
+        if not primary.in_meta_description:
+            high_priority.append(f"Primary keyword '{primary.keyword}' missing from meta description")
+
+    # Secondary keyword issues
+    for status in keyword_status[1:4]:  # First 3 secondary keywords
+        if not status.in_body:
+            medium_priority.append(f"Secondary keyword '{status.keyword}' missing from body")
+
+    # Structural gaps are medium priority
+    for gap in structural_gaps:
+        if "FAQ" in gap or "conclusion" in gap.lower():
+            medium_priority.append(gap)
+        else:
+            standard_priority.append(gap)
+
+    # Depth gaps are medium priority
+    medium_priority.extend(depth_gaps[:3])
+
+    # Format and technical opportunities are standard priority
+    standard_priority.extend(format_opportunities)
+    standard_priority.extend(technical_opportunities)
+
+    return high_priority, medium_priority, standard_priority
+
+
+# =============================================================================
+# 10-Part SEO Framework: Optimization Plan (Part 5)
+# =============================================================================
+
+def build_optimization_plan(
+    audit: ContentAudit,
+    keyword_plan: KeywordPlan,
+) -> OptimizationPlan:
+    """
+    Build a comprehensive optimization plan based on the content audit.
+
+    This implements Part 5 of the framework: Keyword placement hierarchy.
+
+    Args:
+        audit: The ContentAudit from audit_content().
+        keyword_plan: The KeywordPlan with all keywords.
+
+    Returns:
+        OptimizationPlan with targeted optimizations.
+    """
+    primary = keyword_plan.primary.phrase
+    secondary = [kw.phrase for kw in keyword_plan.secondary]
+    long_tail = [kw.phrase for kw in keyword_plan.long_tail_questions]
+
+    # Build placement plan with tiered hierarchy
+    placement_plan = KeywordPlacementPlan(
+        title=primary,  # Primary keyword in title
+        meta_description=primary,  # Primary in meta description
+        h1=primary,  # Primary in H1
+        first_100_words=primary,  # Primary in intro
+        subheadings=secondary[:3],  # Top 3 secondary in subheadings
+        body_priority=[primary] + secondary,  # All keywords by priority
+        faq_keywords=long_tail[:4] if long_tail else secondary[:2],  # Long-tail for FAQ
+        conclusion=[primary] + secondary[:2],  # Primary + top secondary in conclusion
+    )
+
+    # Determine sections to add based on structural gaps
+    sections_to_add = []
+    sections_to_enhance = []
+
+    for gap in audit.structural_gaps:
+        if "FAQ" in gap:
+            sections_to_add.append("FAQ section")
+        elif "conclusion" in gap.lower():
+            sections_to_add.append("Conclusion section")
+        elif "introduction" in gap.lower():
+            sections_to_enhance.append("Introduction")
+
+    # Determine FAQ questions to generate
+    faq_questions = []
+    for kw in keyword_plan.long_tail_questions[:4]:
+        if kw.is_question:
+            faq_questions.append(kw.phrase)
+
+    # If not enough question keywords, generate from secondary
+    if len(faq_questions) < 4:
+        for kw in keyword_plan.secondary[:3]:
+            question = f"What is {kw.phrase}?"
+            if question not in faq_questions:
+                faq_questions.append(question)
+            if len(faq_questions) >= 4:
+                break
+
+    # Generate target meta elements based on audit
+    target_title = _generate_target_title(audit.current_meta_title, primary, audit.topic_summary)
+    target_meta_desc = _generate_target_meta_desc(audit.current_meta_description, primary, audit.topic_summary)
+    target_h1 = _generate_target_h1(audit.current_h1, primary, audit.topic_summary)
+
+    return OptimizationPlan(
+        primary_keyword=primary,
+        secondary_keywords=secondary,
+        audit=audit,
+        target_meta_title=target_title,
+        target_meta_description=target_meta_desc,
+        target_h1=target_h1,
+        sections_to_add=sections_to_add,
+        sections_to_enhance=sections_to_enhance,
+        faq_questions=faq_questions[:4],
+        placement_plan=placement_plan,
+    )
+
+
+def _generate_target_title(
+    current: Optional[str],
+    primary_keyword: str,
+    topic_summary: str,
+) -> str:
+    """Generate a target title placeholder based on requirements."""
+    if current and primary_keyword.lower() in current.lower():
+        return current  # Already has keyword
+    return f"[Optimize: Include '{primary_keyword}' - Current: {current or 'None'}]"
+
+
+def _generate_target_meta_desc(
+    current: Optional[str],
+    primary_keyword: str,
+    topic_summary: str,
+) -> str:
+    """Generate a target meta description placeholder."""
+    if current and primary_keyword.lower() in current.lower():
+        return current
+    return f"[Optimize: Include '{primary_keyword}' naturally - Current: {current or 'None'}]"
+
+
+def _generate_target_h1(
+    current: Optional[str],
+    primary_keyword: str,
+    topic_summary: str,
+) -> str:
+    """Generate a target H1 placeholder."""
+    if current and primary_keyword.lower() in current.lower():
+        return current
+    return f"[Optimize: Include '{primary_keyword}' - Current: {current or 'None'}]"

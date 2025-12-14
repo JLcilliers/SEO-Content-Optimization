@@ -269,6 +269,7 @@ class DocxWriter:
         self._add_keyword_plan_table(
             primary_keyword=result.primary_keyword,
             secondary_keywords=result.secondary_keywords,
+            keyword_usage_counts=result.keyword_usage_counts,
         )
 
         # Add meta elements table
@@ -314,33 +315,39 @@ class DocxWriter:
         self,
         primary_keyword: Optional[str],
         secondary_keywords: Optional[list[str]],
+        keyword_usage_counts: Optional[dict[str, int]] = None,
     ) -> None:
-        """Add the Keyword Plan table showing selected keywords.
+        """Add the Keyword Plan table showing selected keywords and their usage counts.
 
         This table displays the primary keyword and secondary keywords
-        that were used for optimization, providing transparency about
-        the keyword strategy.
+        that were used for optimization, along with how many times each
+        keyword appears in the final optimized content.
 
         Args:
             primary_keyword: The primary keyword used for optimization.
             secondary_keywords: List of secondary keywords used.
+            keyword_usage_counts: Dictionary mapping keyword phrase to occurrence count.
         """
         # Add section header
         self.doc.add_heading("Keyword Plan", level=2)
 
-        # Create table with 2 columns: Type and Keyword
-        table = self.doc.add_table(rows=1, cols=2)
+        # Ensure we have a usage counts dict
+        if keyword_usage_counts is None:
+            keyword_usage_counts = {}
+
+        # Create table with 3 columns: Type, Keyword, and Usage Count
+        table = self.doc.add_table(rows=1, cols=3)
         table.style = "Table Grid"
         table.alignment = WD_TABLE_ALIGNMENT.LEFT
 
         # Set column widths
-        widths = [Inches(1.5), Inches(4.5)]
+        widths = [Inches(1.2), Inches(4.0), Inches(1.0)]
         for i, width in enumerate(widths):
             table.columns[i].width = width
 
         # Add header row
         header_cells = table.rows[0].cells
-        headers = ["Type", "Keyword"]
+        headers = ["Type", "Keyword", "Usage Count"]
         for i, header in enumerate(headers):
             header_cells[i].text = header
             # Bold header text
@@ -360,6 +367,9 @@ class DocxWriter:
                 for run in paragraph.runs:
                     run.font.bold = True
             cells[1].text = primary_keyword
+            # Add usage count
+            count = keyword_usage_counts.get(primary_keyword, 0)
+            cells[2].text = str(count)
 
         # Add secondary keyword rows
         if secondary_keywords:
@@ -368,6 +378,9 @@ class DocxWriter:
                 cells = row.cells
                 cells[0].text = f"Secondary {i + 1}"
                 cells[1].text = secondary
+                # Add usage count
+                count = keyword_usage_counts.get(secondary, 0)
+                cells[2].text = str(count)
 
         # Add spacing after table
         self.doc.add_paragraph()

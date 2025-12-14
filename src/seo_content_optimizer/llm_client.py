@@ -24,8 +24,20 @@ ADD_START = "[[[ADD]]]"
 ADD_END = "[[[ENDADD]]]"
 
 
-# System prompt for SEO optimization
-SEO_SYSTEM_PROMPT = """You are an expert SEO content optimizer. Your task is to enhance content for search engine optimization while maintaining readability and the original message.
+# System prompt for SEO optimization (10-Part SEO Framework)
+SEO_SYSTEM_PROMPT = """You are an expert SEO content optimizer following the 10-Part SEO Framework.
+
+10-PART SEO FRAMEWORK - BODY CONTENT OPTIMIZATION:
+This follows Parts 5, 7, and 8 of the framework:
+- Part 5: Tiered keyword placement (Tiers 3-5, 7 for body content)
+- Part 7: Clean, scannable formatting with natural keyword integration
+- Part 8: High-quality, user-focused content
+
+TIERED KEYWORD PLACEMENT (Part 5):
+- Tier 3: Primary keyword MUST appear in first ~100 words
+- Tier 4: Keywords should appear in subheadings (H2/H3) where natural
+- Tier 5: Keywords distributed throughout body content
+- Tier 7: Keywords in conclusion/summary paragraphs
 
 CRITICAL RULES - MUST FOLLOW:
 1. Keep all original text unless modification is necessary for SEO
@@ -39,14 +51,15 @@ KEYWORD PHRASE INTEGRITY - ESSENTIAL:
 7. "payment processing solutions" = use this exact 3-word phrase together
 8. Long-tail keywords must appear as one unbroken phrase in a single location
 9. NEVER scatter individual words from a keyword phrase across different sentences
+10. Use the EXACT keyword phrases provided - no word reordering or substitution
 
 STRICT TOPICAL CONSTRAINTS - VIOLATIONS WILL BE REJECTED:
-10. NEVER introduce industries, verticals, or business types not already in the original content
-11. NEVER add mentions of: cannabis, hemp, CBD, gambling, adult content, firearms, or other high-risk industries unless they are explicitly in the original
-12. NEVER claim the company "specializes in" or "serves" industries not mentioned in the original
-13. ONLY use keywords that directly relate to what the page is actually about
-14. Do not stuff the company/brand name repeatedly - keep brand mentions reasonable and natural
-15. If a keyword doesn't fit the page topic, DO NOT force it in - skip it entirely
+11. NEVER introduce industries, verticals, or business types not already in the original content
+12. NEVER add mentions of: cannabis, hemp, CBD, gambling, adult content, firearms, or other high-risk industries unless they are explicitly in the original
+13. NEVER claim the company "specializes in" or "serves" industries not mentioned in the original
+14. ONLY use keywords that directly relate to what the page is actually about
+15. Do not stuff the company/brand name repeatedly - keep brand mentions reasonable and natural
+16. If a keyword doesn't fit the page topic, DO NOT force it in - skip it entirely
 
 OUTPUT FORMAT:
 - Return ONLY the optimized text
@@ -146,6 +159,7 @@ class LLMClient:
         primary_keyword: str,
         topic: str,
         max_length: int = 60,
+        target_hint: Optional[str] = None,
     ) -> str:
         """
         Generate an optimized meta title.
@@ -155,21 +169,32 @@ class LLMClient:
             primary_keyword: Primary keyword to include.
             topic: Content topic for context.
             max_length: Maximum title length.
+            target_hint: Pre-computed target from optimization plan (used as guidance).
 
         Returns:
             Optimized title with markers for changed portions.
         """
+        # Build hint guidance if available
+        hint_guidance = ""
+        if target_hint:
+            hint_guidance = f"""
+OPTIMIZATION HINT (use as guidance, you may improve upon it):
+{target_hint}
+"""
+
         prompt = f"""Create an SEO-optimized title tag for a page about: {topic}
 
-Primary keyword (must include near beginning): {primary_keyword}
+Primary keyword (MUST include near beginning): {primary_keyword}
 Current title: {current_title or "None"}
 Maximum length: {max_length} characters
-
-Requirements:
-- Include the primary keyword within the first 30 characters if possible
+{hint_guidance}
+CRITICAL REQUIREMENTS (Part 5 of SEO Framework - Tier 1 Placement):
+- The EXACT phrase "{primary_keyword}" MUST appear in the title
+- Place the primary keyword within the first 30 characters if possible
 - Make it compelling and click-worthy
 - Stay under {max_length} characters
 - If there's a current title, use it as inspiration but optimize for SEO
+- Do NOT split or paraphrase the keyword - use the EXACT phrase
 
 Return ONLY the optimized title as plain text, nothing else. No markers, no explanations."""
 
@@ -177,7 +202,7 @@ Return ONLY the optimized title as plain text, nothing else. No markers, no expl
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=200,
-                system="You are an SEO title optimization expert. Return only the optimized title as plain text.",
+                system="You are an SEO title optimization expert. Return only the optimized title as plain text. The primary keyword phrase MUST appear exactly as provided.",
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text.strip()
@@ -190,6 +215,7 @@ Return ONLY the optimized title as plain text, nothing else. No markers, no expl
         primary_keyword: str,
         topic: str,
         max_length: int = 160,
+        target_hint: Optional[str] = None,
     ) -> str:
         """
         Generate an optimized meta description.
@@ -199,22 +225,32 @@ Return ONLY the optimized title as plain text, nothing else. No markers, no expl
             primary_keyword: Primary keyword to include.
             topic: Content topic for context.
             max_length: Maximum description length.
+            target_hint: Pre-computed target from optimization plan (used as guidance).
 
         Returns:
             Optimized description with markers.
         """
+        # Build hint guidance if available
+        hint_guidance = ""
+        if target_hint:
+            hint_guidance = f"""
+OPTIMIZATION HINT (use as guidance, you may improve upon it):
+{target_hint}
+"""
+
         prompt = f"""Create an SEO-optimized meta description for a page about: {topic}
 
-Primary keyword (must include naturally): {primary_keyword}
+Primary keyword (MUST include naturally): {primary_keyword}
 Current description: {current_description or "None"}
 Maximum length: {max_length} characters
-
-Requirements:
-- Include the primary keyword naturally
+{hint_guidance}
+CRITICAL REQUIREMENTS (Part 5 of SEO Framework - CTR Optimization):
+- The EXACT phrase "{primary_keyword}" MUST appear in the description
 - Use active voice
 - Include a clear call-to-action (e.g., "Learn more", "Get a quote", "Discover how")
 - Be compelling and informative
 - Stay under {max_length} characters
+- Do NOT split or paraphrase the keyword - use the EXACT phrase
 
 Return ONLY the optimized description as plain text, nothing else. No markers, no explanations."""
 
@@ -222,7 +258,7 @@ Return ONLY the optimized description as plain text, nothing else. No markers, n
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=300,
-                system="You are an SEO meta description expert. Return only the optimized description as plain text.",
+                system="You are an SEO meta description expert. Return only the optimized description as plain text. The primary keyword phrase MUST appear exactly as provided.",
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text.strip()
@@ -235,6 +271,7 @@ Return ONLY the optimized description as plain text, nothing else. No markers, n
         primary_keyword: str,
         title: str,
         topic: str,
+        target_hint: Optional[str] = None,
     ) -> str:
         """
         Generate an optimized H1 heading.
@@ -244,21 +281,31 @@ Return ONLY the optimized description as plain text, nothing else. No markers, n
             primary_keyword: Primary keyword to include.
             title: The page title (H1 should complement, not duplicate).
             topic: Content topic.
+            target_hint: Pre-computed target from optimization plan (used as guidance).
 
         Returns:
             Optimized H1 with markers.
         """
+        # Build hint guidance if available
+        hint_guidance = ""
+        if target_hint:
+            hint_guidance = f"""
+OPTIMIZATION HINT (use as guidance, you may improve upon it):
+{target_hint}
+"""
+
         prompt = f"""Create an SEO-optimized H1 heading for a page about: {topic}
 
-Primary keyword (must include): {primary_keyword}
+Primary keyword (MUST include): {primary_keyword}
 Current H1: {current_h1 or "None"}
 Page title (H1 should complement, not duplicate exactly): {title}
-
-Requirements:
-- Include the primary keyword
+{hint_guidance}
+CRITICAL REQUIREMENTS (Part 5 of SEO Framework - Tier 2 Placement):
+- The EXACT phrase "{primary_keyword}" MUST appear in the H1
 - More descriptive than the title
 - Not an exact copy of the title
 - Clear and engaging
+- Do NOT split or paraphrase the keyword - use the EXACT phrase
 
 Return ONLY the optimized H1 as plain text, nothing else. No markers, no explanations."""
 
@@ -266,7 +313,7 @@ Return ONLY the optimized H1 as plain text, nothing else. No markers, no explana
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=200,
-                system="You are an SEO heading optimization expert. Return only the optimized H1 as plain text.",
+                system="You are an SEO heading optimization expert. Return only the optimized H1 as plain text. The primary keyword phrase MUST appear exactly as provided.",
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text.strip()
@@ -282,9 +329,13 @@ Return ONLY the optimized H1 as plain text, nothing else. No markers, no explana
         num_items: int = 4,
         content_topics: list[str] = None,
         brand_context: dict = None,
+        faq_keywords: list[str] = None,
+        planned_questions: list[str] = None,
     ) -> list[dict[str, str]]:
         """
         Generate FAQ items based on keywords.
+
+        Part 10 of 10-Part SEO Framework: FAQ generation for featured snippets.
 
         Args:
             topic: Content topic.
@@ -294,9 +345,11 @@ Return ONLY the optimized H1 as plain text, nothing else. No markers, no explana
             num_items: Number of FAQ items to generate.
             content_topics: List of main topics from the original content (for constraints).
             brand_context: Dict with brand name and mention limits.
+            faq_keywords: Specific keywords to integrate into FAQ answers (from placement plan).
+            planned_questions: Pre-planned FAQ questions from optimization plan.
 
         Returns:
-            List of dicts with 'question' and 'answer' keys, with markers.
+            List of dicts with 'question' and 'answer' keys.
         """
         questions_list = "\n".join(f"- {q}" for q in question_keywords) if question_keywords else "None provided"
         keywords_list = ", ".join([primary_keyword] + secondary_keywords[:3])
@@ -320,10 +373,35 @@ BRAND NAME: "{brand_name}"
 - Do NOT stuff the brand name into every answer
 """
 
+        # Build FAQ keyword integration instruction (Part 10 of 10-Part Framework)
+        faq_keyword_instruction = ""
+        if faq_keywords:
+            faq_keyword_instruction = f"""
+KEYWORDS TO INTEGRATE INTO FAQ ANSWERS (Part 10 of 10-Part SEO Framework):
+The following keywords should be naturally incorporated into FAQ answers:
+{', '.join(faq_keywords)}
+
+IMPORTANT: Use these EXACT phrases in your answers where they fit naturally.
+Each keyword should appear at least once across all FAQ items.
+"""
+
+        # Build planned questions instruction
+        planned_questions_instruction = ""
+        if planned_questions:
+            planned_questions_instruction = f"""
+SUGGESTED QUESTIONS (based on content audit):
+The following questions address gaps identified in the original content:
+{chr(10).join(f'- {q}' for q in planned_questions[:num_items])}
+
+Prioritize these questions if they fit the topic, or create similar questions addressing these themes.
+"""
+
         prompt = f"""Generate {num_items} FAQ items for a page about: {topic}
 
 ALLOWED KEYWORDS (use ONLY these): {keywords_list}
 {brand_instruction}
+{faq_keyword_instruction}
+{planned_questions_instruction}
 Question keywords to address (if relevant):
 {questions_list}
 {topic_constraint}
@@ -332,6 +410,7 @@ STRICT REQUIREMENTS - READ CAREFULLY:
 2. Answers should be 2-4 sentences, helpful and informative
 3. ONLY use keywords from the ALLOWED KEYWORDS list above - no other keywords
 4. Do NOT make up specific facts, prices, or claims not verifiable
+5. Integrate the FAQ keywords naturally into answers where appropriate
 
 ABSOLUTE RESTRICTIONS - VIOLATIONS WILL BE REJECTED:
 - ONLY use keywords from the EXACT list provided above - introducing other keywords is forbidden
@@ -358,12 +437,18 @@ A: Next answer.
                 max_tokens=2000,
                 system="""You are an SEO FAQ content expert. Generate helpful FAQ items that are STRICTLY on-topic.
 
+Part 10 of 10-Part SEO Framework: FAQ Generation for Featured Snippets
+- FAQs help capture "People Also Ask" featured snippets
+- Each answer should naturally incorporate assigned keywords
+- Questions should address common user queries about the specific topic
+
 CRITICAL RULES - MUST FOLLOW:
 1. You must NEVER introduce industries, verticals, or business types not in the original topic
 2. You must ONLY use keywords from the exact list provided - no other keywords
 3. If the page is about "Payment Processing Comparison", FAQs should be about that comparison ONLY
 4. NEVER mention: restaurants, salons, spas, CBD, hemp, cannabis, gambling, high-risk merchants, or ANY specific industry
 5. Keep answers focused on the exact topic provided
+6. Integrate the provided FAQ keywords naturally into answers
 
 Only generate FAQs that someone reading the specific page would actually ask about THAT SPECIFIC topic.""",
                 messages=[{"role": "user", "content": prompt}],
@@ -453,9 +538,9 @@ BRAND NAME CONTROL (STRICT):
 - If adding the brand name would sound unnatural, DO NOT add it
 """
 
-        return f"""Optimize the following content for SEO.
+        return f"""Optimize the following content for SEO following the 10-Part SEO Framework.
 
-PRIMARY KEYWORD (include naturally if it fits): {primary_keyword}
+PRIMARY KEYWORD (MUST appear in first ~100 words - Tier 3): {primary_keyword}
 
 SECONDARY KEYWORDS (use ONLY if they fit naturally): {secondary_list}
 
@@ -464,9 +549,15 @@ ADDITIONAL CONTEXT: {context or "None provided"}
 ORIGINAL CONTENT:
 {content}
 
-INSTRUCTIONS:
+10-PART SEO FRAMEWORK - TIERED KEYWORD PLACEMENT (Part 5):
+1. PRIMARY KEYWORD (Tier 3): MUST appear in first ~100 words of body content
+2. SUBHEADINGS (Tier 4): Place keywords in H2/H3 headings where natural
+3. BODY CONTENT (Tier 5): Distribute keywords throughout body paragraphs
+4. CONCLUSION (Tier 7): Include primary keyword in conclusion/summary
+
+OPTIMIZATION INSTRUCTIONS:
 1. Preserve all original content and meaning
-2. Add the primary keyword naturally in the first paragraph if not present
+2. GUARANTEE the primary keyword appears in the first paragraph (Tier 3 requirement)
 3. Weave in secondary keywords ONLY where they fit naturally
 4. Add clarifying phrases or sentences if they help include keywords naturally
 5. Keep the same paragraph structure

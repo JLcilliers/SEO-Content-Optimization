@@ -269,6 +269,9 @@ class OptimizationResult:
     primary_keyword: Optional[str] = None
     secondary_keywords: list[str] = field(default_factory=list)
 
+    # Keyword usage counts (phrase -> count in final output)
+    keyword_usage_counts: dict[str, int] = field(default_factory=dict)
+
     @property
     def title_tag(self) -> Optional[MetaElement]:
         """Get the title tag meta element."""
@@ -316,3 +319,180 @@ class KeywordUsageStats:
     in_h1: bool = False
     in_headings: bool = False
     in_first_100_words: bool = False
+
+
+# =============================================================================
+# NEW: 10-Part SEO Framework Models
+# =============================================================================
+
+@dataclass
+class KeywordPlacementStatus:
+    """
+    Tracks where a specific keyword appears in the content.
+
+    Used during content audit to identify gaps in keyword placement
+    according to the tiered hierarchy:
+    - Tier 1: Title Tag
+    - Tier 2: H1
+    - Tier 3: First 100 words
+    - Tier 4: Subheadings (H2/H3)
+    - Tier 5: Body content
+    - Tier 6: Alt text (tracked but not always available)
+    - Tier 7: Conclusion
+    """
+    keyword: str
+    in_title: bool = False
+    in_meta_description: bool = False
+    in_h1: bool = False
+    in_first_100_words: bool = False
+    in_subheadings: bool = False
+    in_body: bool = False
+    in_conclusion: bool = False
+    body_count: int = 0  # How many times it appears in body
+
+    @property
+    def placement_score(self) -> int:
+        """
+        Calculate a placement score based on tier importance.
+
+        Higher score = better placement coverage.
+        """
+        score = 0
+        if self.in_title:
+            score += 10  # Tier 1 - most important
+        if self.in_h1:
+            score += 9   # Tier 2
+        if self.in_first_100_words:
+            score += 8   # Tier 3
+        if self.in_subheadings:
+            score += 6   # Tier 4
+        if self.in_body:
+            score += 4   # Tier 5
+        if self.in_conclusion:
+            score += 5   # Tier 7
+        if self.in_meta_description:
+            score += 7   # Important for CTR
+        return score
+
+    @property
+    def missing_placements(self) -> list[str]:
+        """List placements where keyword is missing."""
+        missing = []
+        if not self.in_title:
+            missing.append("title")
+        if not self.in_meta_description:
+            missing.append("meta_description")
+        if not self.in_h1:
+            missing.append("h1")
+        if not self.in_first_100_words:
+            missing.append("first_100_words")
+        if not self.in_subheadings:
+            missing.append("subheadings")
+        if not self.in_body:
+            missing.append("body")
+        if not self.in_conclusion:
+            missing.append("conclusion")
+        return missing
+
+
+@dataclass
+class ContentAudit:
+    """
+    Comprehensive audit of content following the 10-part SEO framework.
+
+    This captures:
+    - Parts 1-4: Understanding what search engines want, target keywords,
+      current state audit, and gap identification
+    - Part 6: Research/competitive context
+    - Part 9: Prioritized recommendations by impact
+    """
+    # Basic content info
+    topic_summary: str  # 1-2 sentence description of what the page is about
+    intent: str  # "informational", "transactional", or "mixed"
+    word_count: int = 0
+
+    # Current meta state
+    current_meta_title: Optional[str] = None
+    current_meta_description: Optional[str] = None
+    current_h1: Optional[str] = None
+
+    # Structure analysis
+    heading_outline: list[str] = field(default_factory=list)  # H1/H2/H3 text in order
+
+    # Keyword placement analysis
+    keyword_status: list[KeywordPlacementStatus] = field(default_factory=list)
+
+    # Gap analysis (Part 4)
+    depth_gaps: list[str] = field(default_factory=list)  # Missing subtopics searchers expect
+    structural_gaps: list[str] = field(default_factory=list)  # e.g., "no FAQ", "no clear conclusion"
+    format_opportunities: list[str] = field(default_factory=list)  # e.g., "comparison table", "bullet list"
+    technical_opportunities: list[str] = field(default_factory=list)  # e.g., "FAQ schema", "internal links"
+
+    # Prioritized issues (Part 9)
+    high_priority_issues: list[str] = field(default_factory=list)  # Meta/H1/keyword presence
+    medium_priority_issues: list[str] = field(default_factory=list)  # Content depth
+    standard_priority_issues: list[str] = field(default_factory=list)  # Technical polish
+
+    @property
+    def primary_keyword_status(self) -> Optional[KeywordPlacementStatus]:
+        """Get the placement status for the primary keyword (first in list)."""
+        return self.keyword_status[0] if self.keyword_status else None
+
+    @property
+    def has_critical_gaps(self) -> bool:
+        """Check if there are critical keyword placement gaps."""
+        primary = self.primary_keyword_status
+        if not primary:
+            return True
+        return not (primary.in_title and primary.in_h1 and primary.in_first_100_words)
+
+
+@dataclass
+class KeywordPlacementPlan:
+    """
+    Specifies where each keyword should be placed in the optimized content.
+
+    Implements Part 5 of the framework: Keyword placement hierarchy.
+    """
+    title: str  # Which keyword goes in title (usually primary)
+    meta_description: str  # Which keyword goes in meta description
+    h1: str  # Which keyword goes in H1 (usually primary)
+    first_100_words: str  # Which keyword must appear early (primary)
+    subheadings: list[str] = field(default_factory=list)  # Keywords for H2/H3
+    body_priority: list[str] = field(default_factory=list)  # Keywords by priority for body
+    faq_keywords: list[str] = field(default_factory=list)  # Keywords to use in FAQ
+    conclusion: list[str] = field(default_factory=list)  # Keywords for conclusion
+
+
+@dataclass
+class OptimizationPlan:
+    """
+    Complete plan for content optimization based on audit results.
+
+    This bridges the gap between analysis and execution, ensuring
+    all optimization follows the 10-part framework systematically.
+    """
+    # Reference to keyword plan
+    primary_keyword: str
+    secondary_keywords: list[str] = field(default_factory=list)
+
+    # Reference to audit
+    audit: Optional[ContentAudit] = None
+
+    # Target meta elements
+    target_meta_title: str = ""
+    target_meta_description: str = ""
+    target_h1: str = ""
+
+    # Structural plan
+    sections_to_add: list[str] = field(default_factory=list)  # e.g., ["FAQ section", "Comparison table"]
+    sections_to_enhance: list[str] = field(default_factory=list)  # Existing sections needing work
+    faq_questions: list[str] = field(default_factory=list)  # Planned FAQ questions
+
+    # Keyword placement mapping
+    placement_plan: Optional[KeywordPlacementPlan] = None
+
+    @property
+    def all_keywords(self) -> list[str]:
+        """Get all keywords in priority order."""
+        return [self.primary_keyword] + self.secondary_keywords

@@ -259,8 +259,8 @@ class TestFindMissingKeywords:
     def test_all_present(self):
         """Test when all keywords are present."""
         content = PageMeta(
-            title="Insurance and Liability",
-            content_blocks=["Coverage options available."],
+            title="Insurance and Liability Coverage",
+            content_blocks=["Insurance liability coverage options available."],
         )
 
         keywords = [

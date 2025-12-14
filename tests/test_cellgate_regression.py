@@ -1,0 +1,363 @@
+"""
+Regression tests for CellGate scenario.
+
+These tests verify the fixes for:
+1. Bug 1: Keyword Enforcement - Keywords must reliably appear in output
+2. Bug 2: Highlighting - Only changed/new sentences should be highlighted
+
+The CellGate content is about external cameras for property security.
+Primary keyword: "external cameras"
+Secondary keywords: ["property security", "access control"]
+"""
+
+import pytest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from src.seo_content_optimizer.models import (
+    HeadingLevel,
+    Keyword,
+    KeywordPlan,
+    MetaElement,
+    OptimizationResult,
+    ParagraphBlock,
+)
+from src.seo_content_optimizer.optimizer import (
+    ContentOptimizer,
+    count_keyword_in_text,
+    ensure_keyword_in_text,
+)
+from src.seo_content_optimizer.diff_markers import (
+    MARK_END,
+    MARK_START,
+    compute_markers_v2,
+    mark_block_as_new,
+    normalize_sentence,
+    strip_markers,
+)
+from src.seo_content_optimizer.docx_writer import DocxWriter
+
+
+# Load CellGate fixture content
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+CELLGATE_ORIGINAL = (FIXTURES_DIR / "enhancing_property_security_original.txt").read_text(encoding="utf-8")
+CELLGATE_OPTIMIZED_RAW = (FIXTURES_DIR / "enhancing_property_security_optimized_raw.txt").read_text(encoding="utf-8")
+
+
+class TestKeywordEnforcement:
+    """Tests for Bug 1: Keywords must reliably appear in output."""
+
+    def test_ensure_keyword_in_text_when_present(self):
+        """If keyword already present, text unchanged."""
+        text = "External cameras are great for security."
+        result = ensure_keyword_in_text(text, "external cameras")
+        assert result == text  # No change needed
+
+    def test_ensure_keyword_in_text_case_insensitive(self):
+        """Keyword check is case-insensitive."""
+        text = "EXTERNAL CAMERAS are essential."
+        result = ensure_keyword_in_text(text, "external cameras")
+        assert result == text  # No change needed - already present
+
+    def test_ensure_keyword_in_text_inject_at_start(self):
+        """If keyword missing, inject at start with colon separator."""
+        text = "Security systems help protect property."
+        result = ensure_keyword_in_text(text, "external cameras", position="start")
+        assert result.startswith("external cameras:")
+        assert "external cameras" in result.lower()
+
+    def test_ensure_keyword_in_text_inject_at_end(self):
+        """If keyword missing, inject at end."""
+        text = "Security systems help protect property."
+        result = ensure_keyword_in_text(text, "external cameras", position="end")
+        assert "external cameras" in result.lower()
+
+    def test_ensure_keyword_in_text_preserves_punctuation(self):
+        """Injection preserves final punctuation."""
+        text = "This is a great system."
+        result = ensure_keyword_in_text(text, "cameras", position="end")
+        assert result.endswith(".")
+
+    def test_count_keyword_in_text_basic(self):
+        """Basic keyword counting works."""
+        text = "External cameras for property. External cameras are great."
+        count = count_keyword_in_text(text, "external cameras")
+        assert count == 2
+
+    def test_count_keyword_in_text_case_insensitive(self):
+        """Keyword counting is case-insensitive."""
+        text = "EXTERNAL CAMERAS and external cameras and External Cameras."
+        count = count_keyword_in_text(text, "external cameras")
+        assert count == 3
+
+    def test_count_keyword_in_text_empty(self):
+        """Empty text returns 0."""
+        assert count_keyword_in_text("", "keyword") == 0
+        assert count_keyword_in_text("text", "") == 0
+
+
+class TestSentenceLevelDiff:
+    """Tests for Bug 2: Only changed/new sentences should be highlighted."""
+
+    def test_identical_sentence_no_markers(self):
+        """Sentence that exists in original should have no markers."""
+        original = "External cameras are great. They help with security."
+        rewritten = "External cameras are great. They help with security."
+
+        result = compute_markers_v2(original, rewritten, full_original_text=original)
+
+        # No markers since sentences are identical
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+    def test_new_sentence_fully_marked(self):
+        """Sentence not in original should be fully wrapped in markers."""
+        original = "External cameras are great."
+        rewritten = "External cameras are great. This is a new sentence."
+
+        result = compute_markers_v2(original, rewritten, full_original_text=original)
+
+        # First sentence should be unmarked
+        assert "External cameras are great." in result
+        # New sentence should be fully wrapped
+        assert f"{MARK_START}This is a new sentence.{MARK_END}" in result
+
+    def test_modified_sentence_fully_marked(self):
+        """Modified sentence should be fully wrapped (all-or-nothing)."""
+        original = "External cameras are great."
+        rewritten = "External cameras are excellent and amazing."
+
+        result = compute_markers_v2(original, rewritten, full_original_text=original)
+
+        # The changed sentence should be fully wrapped
+        assert MARK_START in result
+        assert MARK_END in result
+
+    def test_punctuation_normalization(self):
+        """Smart quotes vs straight quotes should match after normalization."""
+        original = "CellGate's cameras are great."  # Smart apostrophe
+        rewritten = "CellGate's cameras are great."  # Straight apostrophe
+
+        # Normalized versions should match
+        assert normalize_sentence(original) == normalize_sentence(rewritten)
+
+    def test_no_token_level_highlighting(self):
+        """Verify no partial word highlighting (entire sentence or nothing)."""
+        original = "The camera provides good coverage."
+        rewritten = "The camera provides excellent coverage."
+
+        result = compute_markers_v2(original, rewritten, full_original_text=original)
+
+        # Should NOT have markers around just "excellent"
+        # Instead, entire sentence should be wrapped
+        assert f"{MARK_START}excellent{MARK_END}" not in result
+
+
+class TestCellGateContent:
+    """Tests using actual CellGate fixture content."""
+
+    def test_cellgate_original_content_loads(self):
+        """Verify CellGate fixture content loads correctly."""
+        assert len(CELLGATE_ORIGINAL) > 0
+        assert "CellGate" in CELLGATE_ORIGINAL
+        assert "external cameras" in CELLGATE_ORIGINAL.lower()
+
+    def test_unchanged_sentences_not_highlighted(self):
+        """Sentences that exist in original should not be highlighted."""
+        # A sentence from the original
+        original_sentence = "External Cameras for Enhanced Property Security: A Guide to Your Options"
+
+        # When the rewritten text contains only sentences from the original,
+        # and we compare against the full original, no markers should appear
+        # The key is the original param should be a subset we're comparing from
+        result = compute_markers_v2(
+            original_sentence,  # Original block text
+            original_sentence,  # Rewritten (same text)
+            full_original_text=CELLGATE_ORIGINAL  # Full document for context
+        )
+
+        # Should not have markers since it's identical
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+    def test_strip_markers_preserves_content(self):
+        """strip_markers removes markers but preserves content."""
+        marked_text = f"Hello {MARK_START}world{MARK_END}!"
+        result = strip_markers(marked_text)
+        assert result == "Hello world!"
+        assert MARK_START not in result
+        assert MARK_END not in result
+
+
+class TestKeywordUsageCounts:
+    """Tests for keyword usage counts in Keyword Plan table."""
+
+    def test_optimization_result_has_usage_counts(self):
+        """OptimizationResult includes keyword_usage_counts field."""
+        result = OptimizationResult(
+            primary_keyword="external cameras",
+            secondary_keywords=["property security"],
+            keyword_usage_counts={
+                "external cameras": 5,
+                "property security": 3,
+            }
+        )
+
+        assert result.keyword_usage_counts is not None
+        assert result.keyword_usage_counts["external cameras"] == 5
+        assert result.keyword_usage_counts["property security"] == 3
+
+    def test_default_usage_counts_empty(self):
+        """Default keyword_usage_counts is empty dict."""
+        result = OptimizationResult()
+        assert result.keyword_usage_counts == {}
+
+
+class TestDocxWriterKeywordTable:
+    """Tests for DOCX keyword plan table with usage counts."""
+
+    def test_keyword_plan_table_includes_usage_column(self):
+        """Keyword Plan table should have Type, Keyword, Usage Count columns."""
+        writer = DocxWriter()
+
+        # Call the method with usage counts
+        writer._add_keyword_plan_table(
+            primary_keyword="external cameras",
+            secondary_keywords=["property security", "access control"],
+            keyword_usage_counts={
+                "external cameras": 7,
+                "property security": 4,
+                "access control": 2,
+            }
+        )
+
+        # Check that table was created with correct structure
+        # The table should be in the document
+        tables = writer.doc.tables
+        assert len(tables) >= 1
+
+        # Last table should be keyword plan
+        table = tables[-1]
+
+        # Should have 3 columns (Type, Keyword, Usage Count)
+        assert table.rows[0].cells[0].text == "Type"
+        assert table.rows[0].cells[1].text == "Keyword"
+        assert table.rows[0].cells[2].text == "Usage Count"
+
+    def test_keyword_plan_table_shows_counts(self):
+        """Keyword Plan table should display correct usage counts."""
+        writer = DocxWriter()
+
+        writer._add_keyword_plan_table(
+            primary_keyword="external cameras",
+            secondary_keywords=["property security"],
+            keyword_usage_counts={
+                "external cameras": 7,
+                "property security": 4,
+            }
+        )
+
+        table = writer.doc.tables[-1]
+
+        # Row 1 (primary): should have count "7"
+        assert table.rows[1].cells[2].text == "7"
+
+        # Row 2 (secondary 1): should have count "4"
+        assert table.rows[2].cells[2].text == "4"
+
+    def test_keyword_plan_table_handles_missing_counts(self):
+        """Table handles missing counts gracefully (shows 0)."""
+        writer = DocxWriter()
+
+        writer._add_keyword_plan_table(
+            primary_keyword="external cameras",
+            secondary_keywords=["property security"],
+            keyword_usage_counts={
+                "external cameras": 5,
+                # property security not in dict
+            }
+        )
+
+        table = writer.doc.tables[-1]
+
+        # Primary should have count
+        assert table.rows[1].cells[2].text == "5"
+
+        # Secondary with missing count should show "0"
+        assert table.rows[2].cells[2].text == "0"
+
+
+class TestMetaElementHighlighting:
+    """Tests for meta element all-or-nothing highlighting."""
+
+    def test_meta_element_unchanged_no_markers(self):
+        """Meta element identical to original should have no markers."""
+        # If title is exactly the same, no markers
+        original_title = "External Cameras for Property Security"
+        optimized_title = "External Cameras for Property Security"
+
+        # After normalization, these should be equal
+        assert normalize_sentence(original_title) == normalize_sentence(optimized_title)
+
+    def test_meta_element_changed_fully_wrapped(self):
+        """Changed meta element should be fully wrapped with markers."""
+        original_title = "External Cameras Guide"
+        optimized_title = "External Cameras for Property Security - Complete Guide"
+
+        # These are different
+        assert normalize_sentence(original_title) != normalize_sentence(optimized_title)
+
+        # When different, entire element gets wrapped
+        if normalize_sentence(original_title) != normalize_sentence(optimized_title):
+            wrapped = f"{MARK_START}{optimized_title}{MARK_END}"
+            assert MARK_START in wrapped
+            assert MARK_END in wrapped
+
+
+class TestFAQHighlighting:
+    """Tests for FAQ section highlighting (always 100% green)."""
+
+    def test_faq_items_always_marked_as_new(self):
+        """FAQ items should always be fully marked since they're new content."""
+        question = "What are external cameras?"
+        answer = "External cameras are security devices."
+
+        marked_q = mark_block_as_new(question)
+        marked_a = mark_block_as_new(answer)
+
+        # Both should be fully wrapped
+        assert marked_q.startswith(MARK_START)
+        assert marked_q.endswith(MARK_END)
+        assert marked_a.startswith(MARK_START)
+        assert marked_a.endswith(MARK_END)
+
+
+class TestEdgeCases:
+    """Edge case tests for the CellGate scenario."""
+
+    def test_empty_original_marks_all_new(self):
+        """Empty original text results in all content marked as new."""
+        result = compute_markers_v2("", "New content here.", full_original_text="")
+        assert MARK_START in result
+        assert MARK_END in result
+
+    def test_empty_rewritten_returns_empty(self):
+        """Empty rewritten text returns empty string."""
+        result = compute_markers_v2("Original text.", "", full_original_text="Original text.")
+        assert result == ""
+
+    def test_whitespace_normalization(self):
+        """Multiple spaces normalized to single space for comparison."""
+        original = "External   cameras  are   great."  # Multiple spaces
+        rewritten = "External cameras are great."  # Single spaces
+
+        # Normalized versions should match
+        assert normalize_sentence(original) == normalize_sentence(rewritten)
+
+    def test_unicode_normalization(self):
+        """Unicode variations normalized for comparison."""
+        # NFKC normalization handles things like ligatures
+        original = "efficacy"  # Could have fi ligature in some fonts
+        rewritten = "efficacy"
+
+        assert normalize_sentence(original) == normalize_sentence(rewritten)

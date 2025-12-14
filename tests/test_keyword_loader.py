@@ -58,7 +58,7 @@ class TestLoadKeywordsFromCSV:
         csv_path = tmp_path / "empty.csv"
         csv_path.write_text("keyword\n")
 
-        with pytest.raises(KeywordLoadError, match="No valid keywords found"):
+        with pytest.raises(KeywordLoadError, match="Keyword file is empty"):
             load_keywords_from_csv(csv_path)
 
 

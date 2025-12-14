@@ -8,24 +8,29 @@ This module computes differences between original and rewritten text
 and inserts [[[ADD]]]/[[[ENDADD]]] markers around changed content.
 
 KEY PRINCIPLE: Sentence is the unit of change.
+KEY RULE: STRICT EXACT MATCH ONLY - NO similarity thresholds.
 
 For each sentence S in rewritten text:
-1. Normalize S (NFKC, collapse whitespace, lowercase)
+1. Normalize S (NFKC, collapse whitespace, lowercase, normalize punctuation)
 2. If normalized S exists in original_sentence_index → UNCHANGED (no markers)
 3. Else → CHANGED/NEW → wrap ENTIRE sentence in markers
 
 NO token-level diff inside sentences. A sentence is either:
-- Fully unchanged (black text)
-- Fully changed (green highlight)
+- Fully unchanged (black text) - ONLY if EXACT match after normalization
+- Fully changed (green highlight) - if ANY difference at all
 
 This eliminates confusing partial highlights and makes the output predictable.
 
 Key guarantees:
-- Green = new/changed sentences
-- Black = sentences identical to original (after normalization)
+- Green = new/changed sentences (ANY change = full green)
+- Black = sentences IDENTICAL to original (after normalization)
 - FAQ content is always fully green (it's all new)
 - Meta elements are all-or-nothing (changed = full green)
 - Punctuation-only changes (curly quotes, smart apostrophes) don't trigger highlighting
+  (handled by normalization, not similarity thresholds)
+
+IMPORTANT: There are NO similarity thresholds. A sentence must be an EXACT match
+(after normalization) to remain black. Any difference = full green highlight.
 """
 
 import re
@@ -43,11 +48,11 @@ TOKEN_RE = re.compile(r"\s+|[^\s]+")
 # Sentence boundary pattern - splits on .!? followed by space(s)
 SENT_SPLIT_RE = re.compile(r"(?<=[.!?])(\s+)")
 
-# Default similarity threshold for sentence comparison
-DEFAULT_SIMILARITY_THRESHOLD = 0.80
-
-# Minimum word count for phrase-level diff (short sentences always wrap entire)
-MIN_WORDS_FOR_PHRASE_DIFF = 6
+# DEPRECATED: Similarity thresholds are no longer used in V2 sentence-level diff
+# V2 uses STRICT EXACT MATCH only (after normalization)
+# These constants are kept for backward compatibility but are NOT used
+DEFAULT_SIMILARITY_THRESHOLD = 0.80  # DEPRECATED - not used in V2
+MIN_WORDS_FOR_PHRASE_DIFF = 6  # DEPRECATED - not used in V2
 
 # Punctuation normalization map for diff comparison
 # Maps typographic/smart punctuation to ASCII equivalents
@@ -390,9 +395,13 @@ def compute_markers(
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
 ) -> str:
     """
-    Compute diff-based markers using sentence-level semantics.
+    DEPRECATED: Use compute_markers_v2() instead.
 
-    This is the main entry point for the diff-based highlighting system.
+    This function uses similarity thresholds and phrase-level diff which can
+    cause confusing partial highlights. The V2 function uses strict exact
+    matching only.
+
+    Compute diff-based markers using sentence-level semantics.
 
     SENTENCE-LEVEL ALGORITHM:
     For each sentence S in rewritten text:
@@ -411,11 +420,14 @@ def compute_markers(
         full_original_text: The complete original document text. If provided,
             sentences that appear ANYWHERE in the full document won't be marked.
             If None, falls back to original_block.
-        similarity_threshold: Threshold for phrase-level diff vs full wrap.
+        similarity_threshold: DEPRECATED - not used in V2.
             Default is 0.80 (80% similar = phrase diff, <80% = full wrap).
 
     Returns:
         Rewritten text with accurate [[[ADD]]]/[[[ENDADD]]] markers.
+
+    .. deprecated::
+        Use :func:`compute_markers_v2` instead for strict exact matching.
     """
     if not rewritten:
         return ""
