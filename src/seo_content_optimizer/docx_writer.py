@@ -74,6 +74,72 @@ def set_cell_shading(cell, color: str) -> None:
     tcPr.append(shd)
 
 
+def _normalize_markers_for_newlines(text: str) -> str:
+    """
+    Ensure markers don't span newlines by splitting them at line boundaries.
+
+    If a marker contains a newline, split it so each line has its own markers.
+    This prevents markers from being broken when text is split on newlines.
+
+    Example:
+        "[[[ADD]]]line1\nline2[[[ENDADD]]]"
+        becomes:
+        "[[[ADD]]]line1[[[ENDADD]]]\n[[[ADD]]]line2[[[ENDADD]]]"
+
+    Args:
+        text: Text with markers that may span newlines.
+
+    Returns:
+        Text with markers normalized so they don't span newlines.
+    """
+    if MARK_START not in text:
+        return text
+
+    result = []
+    pos = 0
+
+    while pos < len(text):
+        start = text.find(MARK_START, pos)
+        if start == -1:
+            # No more markers - add rest of text
+            result.append(text[pos:])
+            break
+
+        # Add text before the marker
+        result.append(text[pos:start])
+
+        # Find closing marker
+        end = text.find(MARK_END, start)
+        if end == -1:
+            # Malformed: no closing marker - add rest of text
+            result.append(text[start:])
+            break
+
+        # Extract content between markers
+        content_start = start + len(MARK_START)
+        content = text[content_start:end]
+
+        # Check if content contains newlines
+        if "\n" in content:
+            # Split content on newlines and wrap each part
+            lines = content.split("\n")
+            marked_lines = []
+            for i, line in enumerate(lines):
+                if line:  # Only wrap non-empty lines
+                    marked_lines.append(f"{MARK_START}{line}{MARK_END}")
+                if i < len(lines) - 1:
+                    # Add newline between parts (outside markers)
+                    marked_lines.append("\n")
+            result.append("".join(marked_lines))
+        else:
+            # No newlines - keep marker as-is
+            result.append(f"{MARK_START}{content}{MARK_END}")
+
+        pos = end + len(MARK_END)
+
+    return "".join(result)
+
+
 def add_marked_text(paragraph: Paragraph, text: str, font_name: str = "Poppins") -> None:
     """
     Write `text` into `paragraph`, converting [[[ADD]]]/[[[ENDADD]]] segments
@@ -89,6 +155,10 @@ def add_marked_text(paragraph: Paragraph, text: str, font_name: str = "Poppins")
     """
     # Sanitize text to remove invalid XML characters that cause Word errors
     text = sanitize_for_xml(text)
+
+    # Normalize markers so they don't span newlines
+    # (This helps when text is later split on newlines for structure)
+    text = _normalize_markers_for_newlines(text)
 
     while text:
         start = text.find(MARK_START)
@@ -460,6 +530,10 @@ class DocxWriter:
         - Length (short lines without ending punctuation = likely headings)
         - Content patterns (bullet points, numbered lists)
         """
+        # IMPORTANT: Normalize markers BEFORE splitting on newlines
+        # This ensures markers don't get broken across lines
+        text = _normalize_markers_for_newlines(text)
+
         if "\n" not in text:
             # No newlines - just add as single paragraph
             para = self.doc.add_paragraph()

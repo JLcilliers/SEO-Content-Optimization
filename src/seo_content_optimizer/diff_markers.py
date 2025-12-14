@@ -255,9 +255,22 @@ def add_markers_by_diff(original: str, rewritten: str) -> str:
 
     result = "".join(out)
 
-    # Clean up any empty marker pairs
-    result = result.replace(f"{MARK_START}{MARK_END}", "")
-    result = result.replace(f"{MARK_START} {MARK_END}", " ")
+    # Clean up any empty marker pairs (including those with only whitespace)
+    # Use regex to handle all whitespace variations (spaces, tabs, newlines)
+    import re as _re
+    result = _re.sub(
+        rf"{_re.escape(MARK_START)}\s*{_re.escape(MARK_END)}",
+        "",
+        result
+    )
+
+    # Clean up markers containing only whitespace (no actual content)
+    # These can occur when diff only detects whitespace changes
+    result = _re.sub(
+        rf"{_re.escape(MARK_START)}(\s+){_re.escape(MARK_END)}",
+        r"\1",  # Keep the whitespace but remove markers
+        result
+    )
 
     return result
 
