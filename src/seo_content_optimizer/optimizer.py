@@ -1280,42 +1280,68 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
     def _identify_keyword_insertion_points(
         self,
         blocks: list[ParagraphBlock],
-    ) -> dict[str, int]:
+    ) -> list[int]:
         """
-        Identify strategic insertion points for additional keyword occurrences.
+        Identify EVENLY DISTRIBUTED insertion points throughout the document.
 
-        Returns indices for: first_paragraph, middle_content, closing_paragraph
+        Instead of just 3 points (first/middle/closing), this returns many
+        insertion points spread across the entire document for natural keyword
+        distribution. Points are placed after paragraphs and after headings
+        to create natural transitions.
 
         Args:
             blocks: Content blocks to analyze.
 
         Returns:
-            Dictionary with insertion point names and block indices.
+            List of block indices suitable for keyword insertion, evenly distributed.
         """
-        points = {}
-
-        # Find body paragraphs (non-headings)
+        # Find all body paragraphs (non-headings with substantial content)
         body_indices = [
             i for i, block in enumerate(blocks)
             if not block.is_heading and len(block.text) > 50
         ]
 
         if not body_indices:
-            return points
+            return []
 
-        # First paragraph (after any initial heading)
-        points["first"] = body_indices[0]
+        # Also identify positions right after headings (good transition points)
+        post_heading_indices = []
+        for i, block in enumerate(blocks):
+            if block.is_heading and i + 1 < len(blocks):
+                # The paragraph right after a heading is a good insertion point
+                if not blocks[i + 1].is_heading:
+                    post_heading_indices.append(i + 1)
 
-        # Middle content (around the middle of body paragraphs)
-        if len(body_indices) >= 3:
-            mid_idx = len(body_indices) // 2
-            points["middle"] = body_indices[mid_idx]
+        # Combine and deduplicate, preferring post-heading positions
+        all_candidates = list(set(body_indices + post_heading_indices))
+        all_candidates.sort()
 
-        # Closing paragraph (last substantial paragraph)
-        if len(body_indices) >= 2:
-            points["closing"] = body_indices[-1]
+        if len(all_candidates) <= 3:
+            return all_candidates
 
-        return points
+        # For longer documents, select evenly spaced points
+        # Aim for roughly 1 insertion point per 3-4 paragraphs
+        num_points = max(5, len(all_candidates) // 3)
+        num_points = min(num_points, 10)  # Cap at 10 insertion points
+
+        # Calculate even spacing
+        if len(all_candidates) <= num_points:
+            return all_candidates
+
+        step = len(all_candidates) / num_points
+        selected_indices = []
+        for i in range(num_points):
+            idx = int(i * step)
+            if idx < len(all_candidates):
+                selected_indices.append(all_candidates[idx])
+
+        # Always include first and last if not already included
+        if all_candidates[0] not in selected_indices:
+            selected_indices.insert(0, all_candidates[0])
+        if all_candidates[-1] not in selected_indices:
+            selected_indices.append(all_candidates[-1])
+
+        return sorted(list(set(selected_indices)))
 
     def _generate_keyword_sentences(
         self,
@@ -1392,18 +1418,21 @@ Professional {keyword} solutions provide reliable security for businesses of all
         self,
         blocks: list[ParagraphBlock],
         sentences: list[str],
-        insertion_points: dict[str, int],
+        insertion_points: list[int],
     ) -> list[ParagraphBlock]:
         """
-        Insert keyword sentences at strategic points in the content.
+        Insert keyword sentences at EVENLY DISTRIBUTED points throughout the content.
+
+        This method distributes sentences across the provided insertion points to ensure
+        keywords appear throughout the document, not clustered at beginning/end.
 
         Args:
             blocks: Original content blocks.
             sentences: Sentences to insert.
-            insertion_points: Dictionary of insertion point names to block indices.
+            insertion_points: List of block indices suitable for insertion (evenly distributed).
 
         Returns:
-            Updated blocks with sentences inserted.
+            Updated blocks with sentences inserted at distributed locations.
         """
         if not sentences or not insertion_points:
             return blocks
@@ -1411,42 +1440,77 @@ Professional {keyword} solutions provide reliable security for businesses of all
         # Create a copy of blocks to modify
         updated_blocks = list(blocks)
 
-        # Map sentences to insertion points (prioritize closing, then middle, then first)
-        point_order = ["closing", "middle", "first"]
-        available_points = [p for p in point_order if p in insertion_points]
+        # Distribute sentences evenly across available insertion points
+        # Never insert more than 1 sentence at each location for natural distribution
+        num_sentences = len(sentences)
+        num_points = len(insertion_points)
 
-        # Track offset from insertions
-        offset = 0
+        if num_sentences <= num_points:
+            # We have enough points - distribute one sentence per point, evenly spaced
+            # Calculate which points to use to spread sentences throughout the document
+            if num_sentences == 1:
+                # Single sentence - put it in the middle of the document
+                middle_idx = num_points // 2
+                selected_points = [insertion_points[middle_idx]]
+            else:
+                # Multiple sentences - distribute evenly across all points
+                step = num_points / num_sentences
+                selected_points = []
+                for i in range(num_sentences):
+                    point_idx = int(i * step)
+                    if point_idx < num_points:
+                        selected_points.append(insertion_points[point_idx])
+        else:
+            # More sentences than points - distribute as evenly as possible
+            # Each point gets at most ceil(num_sentences / num_points) sentences
+            selected_points = insertion_points.copy()
+            # Extend by repeating points, but spread them out
+            remaining = num_sentences - num_points
+            if remaining > 0:
+                # Add extra points, distributing them evenly
+                step = num_points / remaining
+                for i in range(remaining):
+                    point_idx = int(i * step)
+                    if point_idx < num_points:
+                        selected_points.append(insertion_points[point_idx])
+            selected_points = selected_points[:num_sentences]
+
+        # Now insert sentences at their assigned points
+        # Track how many sentences we've added to each block to avoid clustering
+        sentences_per_block: dict[int, int] = {}
+        max_sentences_per_block = 2  # Never more than 2 keyword sentences per block
 
         for i, sentence in enumerate(sentences):
-            if i >= len(available_points):
-                # More sentences than insertion points - append to end of last point's block
-                if available_points:
-                    point = available_points[-1]
-                    idx = insertion_points[point] + offset
-                    if idx < len(updated_blocks):
-                        block = updated_blocks[idx]
-                        # Append marked sentence to existing block
-                        marked_sentence = f" {ADD_START}{sentence}{ADD_END}"
-                        combined_text = normalize_paragraph_spacing(block.text + marked_sentence)
-                        updated_blocks[idx] = ParagraphBlock(
-                            text=combined_text,
-                            heading_level=block.heading_level,
-                        )
+            if i >= len(selected_points):
+                break
+
+            idx = selected_points[i]
+            if idx >= len(updated_blocks):
                 continue
 
-            point = available_points[i]
-            idx = insertion_points[point] + offset
+            # Check if this block already has max sentences
+            current_count = sentences_per_block.get(idx, 0)
+            if current_count >= max_sentences_per_block:
+                # Find next available block that hasn't hit the limit
+                found_alternative = False
+                for alt_idx in insertion_points:
+                    if alt_idx != idx and sentences_per_block.get(alt_idx, 0) < max_sentences_per_block:
+                        idx = alt_idx
+                        found_alternative = True
+                        break
+                if not found_alternative:
+                    # All blocks at limit - skip this sentence
+                    continue
 
-            if idx < len(updated_blocks):
-                block = updated_blocks[idx]
-                # Append marked sentence to existing block
-                marked_sentence = f" {ADD_START}{sentence}{ADD_END}"
-                combined_text = normalize_paragraph_spacing(block.text + marked_sentence)
-                updated_blocks[idx] = ParagraphBlock(
-                    text=combined_text,
-                    heading_level=block.heading_level,
-                )
+            block = updated_blocks[idx]
+            # Append marked sentence to existing block
+            marked_sentence = f" {ADD_START}{sentence}{ADD_END}"
+            combined_text = normalize_paragraph_spacing(block.text + marked_sentence)
+            updated_blocks[idx] = ParagraphBlock(
+                text=combined_text,
+                heading_level=block.heading_level,
+            )
+            sentences_per_block[idx] = sentences_per_block.get(idx, 0) + 1
 
         return updated_blocks
 

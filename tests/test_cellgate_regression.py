@@ -434,3 +434,121 @@ class TestSecondaryKeywordEnforcement:
         plan = KeywordPlan(primary=primary, secondary=secondary)
 
         assert "gate intercom with camera" in plan.all_phrases
+
+
+class TestKeywordDistribution:
+    """Tests for even keyword distribution throughout the document."""
+
+    def test_identify_insertion_points_returns_list(self):
+        """Verify _identify_keyword_insertion_points returns a list of indices."""
+        from src.seo_content_optimizer.optimizer import ContentOptimizer
+
+        optimizer = ContentOptimizer.__new__(ContentOptimizer)
+
+        # Create test blocks - mix of headings and paragraphs
+        blocks = [
+            ParagraphBlock(text="Introduction heading", heading_level=HeadingLevel.H1),
+            ParagraphBlock(text="This is the first paragraph with enough content to be a body paragraph for testing purposes."),
+            ParagraphBlock(text="Section heading", heading_level=HeadingLevel.H2),
+            ParagraphBlock(text="This is a second paragraph with substantial content to qualify as a body paragraph."),
+            ParagraphBlock(text="Another section", heading_level=HeadingLevel.H2),
+            ParagraphBlock(text="Third paragraph with enough content to be included in the analysis."),
+            ParagraphBlock(text="Fourth paragraph that should also be considered for keyword insertion."),
+            ParagraphBlock(text="Fifth paragraph with sufficient length to be a candidate."),
+        ]
+
+        result = optimizer._identify_keyword_insertion_points(blocks)
+
+        # Should return a list, not a dict
+        assert isinstance(result, list)
+        # Should have multiple insertion points (not just 3)
+        assert len(result) >= 3
+        # All values should be valid indices
+        for idx in result:
+            assert 0 <= idx < len(blocks)
+
+    def test_insertion_points_evenly_distributed(self):
+        """Verify insertion points are spread throughout the document, not clustered."""
+        from src.seo_content_optimizer.optimizer import ContentOptimizer
+
+        optimizer = ContentOptimizer.__new__(ContentOptimizer)
+
+        # Create a longer document with 15 paragraphs
+        blocks = []
+        for i in range(15):
+            if i % 4 == 0:
+                blocks.append(ParagraphBlock(text=f"Section {i} heading", heading_level=HeadingLevel.H2))
+            else:
+                blocks.append(ParagraphBlock(text=f"This is paragraph {i} with enough content to be a body paragraph for testing."))
+
+        result = optimizer._identify_keyword_insertion_points(blocks)
+
+        # Should have multiple points
+        assert len(result) >= 4
+
+        # Points should be spread out - check that we have points in different thirds
+        first_third = [idx for idx in result if idx < len(blocks) // 3]
+        middle_third = [idx for idx in result if len(blocks) // 3 <= idx < 2 * len(blocks) // 3]
+        last_third = [idx for idx in result if idx >= 2 * len(blocks) // 3]
+
+        # All three sections should have at least one insertion point
+        assert len(first_third) >= 1, "First third should have insertion points"
+        assert len(middle_third) >= 1, "Middle third should have insertion points"
+        assert len(last_third) >= 1, "Last third should have insertion points"
+
+    def test_insert_sentences_distributes_evenly(self):
+        """Verify sentences are distributed across insertion points, not clustered."""
+        from src.seo_content_optimizer.optimizer import ContentOptimizer
+
+        optimizer = ContentOptimizer.__new__(ContentOptimizer)
+
+        # Create 10 blocks
+        blocks = [
+            ParagraphBlock(text=f"Paragraph {i} with some content here.")
+            for i in range(10)
+        ]
+
+        # 5 insertion points across the document
+        insertion_points = [1, 3, 5, 7, 9]
+
+        # 3 sentences to insert
+        sentences = ["Sentence A.", "Sentence B.", "Sentence C."]
+
+        result = optimizer._insert_keyword_sentences(blocks, sentences, insertion_points)
+
+        # Find which blocks have the inserted sentences
+        blocks_with_insertions = []
+        for i, block in enumerate(result):
+            if "Sentence A" in block.text or "Sentence B" in block.text or "Sentence C" in block.text:
+                blocks_with_insertions.append(i)
+
+        # Sentences should be in 3 different blocks (not clustered)
+        assert len(blocks_with_insertions) == 3, "Each sentence should be in a different block"
+
+        # The blocks should be spread out
+        assert blocks_with_insertions != [1, 1, 1], "Sentences should not all be in the same block"
+
+    def test_insert_sentences_respects_max_per_block(self):
+        """Verify no more than 2 sentences per block."""
+        from src.seo_content_optimizer.optimizer import ContentOptimizer
+
+        optimizer = ContentOptimizer.__new__(ContentOptimizer)
+
+        # Create 3 blocks
+        blocks = [
+            ParagraphBlock(text=f"Paragraph {i} content.")
+            for i in range(3)
+        ]
+
+        # Only 2 insertion points
+        insertion_points = [0, 2]
+
+        # 5 sentences to insert (more than points)
+        sentences = ["S1.", "S2.", "S3.", "S4.", "S5."]
+
+        result = optimizer._insert_keyword_sentences(blocks, sentences, insertion_points)
+
+        # Count sentences per block
+        for i, block in enumerate(result):
+            count = sum(1 for s in sentences if s in block.text)
+            assert count <= 2, f"Block {i} has {count} sentences, max should be 2"
