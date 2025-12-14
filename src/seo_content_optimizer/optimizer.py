@@ -1342,18 +1342,19 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
         secondary_target: int = 3,
     ) -> list[ParagraphBlock]:
         """
-        Distribute ALL keywords EVENLY across document sections.
+        Distribute ALL keywords EVENLY across the ENTIRE document using paragraph intervals.
 
-        This is the UNIFIED keyword distribution method that replaces separate
-        primary/secondary enforcement. It ensures keywords are spread throughout
-        the document, not clustered at beginning/end.
+        This is the UNIFIED keyword distribution method that ensures keywords are
+        spread throughout the document, not clustered at beginning/end or section
+        boundaries only.
 
         Algorithm:
-        1. Split document into sections based on H2 headings
+        1. Identify ALL body paragraphs in the document
         2. Calculate keyword needs (primary and all secondaries)
-        3. Distribute keywords proportionally across sections
-        4. Insert at section boundaries (end of each section)
-        5. Validate max 2 consecutive green sentences
+        3. Calculate insertion interval: total_paragraphs / total_insertions
+        4. Assign keywords to paragraphs at regular intervals throughout document
+        5. Ensure no span of 3+ paragraphs is skipped
+        6. Validate max 2 consecutive green sentences per block
 
         Args:
             meta_elements: Meta elements (to count existing keyword usage).
@@ -1364,12 +1365,12 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
             secondary_target: Target count for each secondary keyword.
 
         Returns:
-            Updated blocks with keywords evenly distributed.
+            Updated blocks with keywords evenly distributed throughout.
         """
-        # Step 1: Split into sections based on H2 headings
-        sections = self._split_into_sections(blocks)
+        # Step 1: Identify ALL body paragraphs (non-headings with content)
+        paragraph_indices = self._get_all_paragraph_indices(blocks)
 
-        if not sections:
+        if not paragraph_indices:
             return blocks
 
         # Step 2: Calculate keyword needs
@@ -1384,22 +1385,247 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
         if not keyword_needs:
             return blocks  # All keywords already at target
 
-        # Step 3: Create insertion assignments - distribute across sections
-        section_assignments = self._assign_keywords_to_sections(
-            sections=sections,
-            keyword_needs=keyword_needs,
+        # Step 3: Build flat list of all keyword insertions needed
+        all_insertions = []
+        for kw_info in keyword_needs:
+            for _ in range(kw_info["needed"]):
+                all_insertions.append(kw_info["keyword"])
+
+        if not all_insertions:
+            return blocks
+
+        # Step 4: Calculate insertion points using paragraph intervals
+        # Distribute insertions evenly throughout the document
+        insertion_assignments = self._calculate_paragraph_interval_insertions(
+            paragraph_indices=paragraph_indices,
+            insertions=all_insertions,
         )
 
-        # Step 4: Generate sentences and insert at section boundaries
-        updated_blocks = self._insert_keywords_by_section(
+        # Step 5: Insert keywords at their assigned paragraphs
+        updated_blocks = self._insert_keywords_at_paragraphs(
             blocks=blocks,
-            sections=sections,
-            section_assignments=section_assignments,
+            insertion_assignments=insertion_assignments,
             topic=topic,
         )
 
-        # Step 5: Validate and fix clustering (max 2 consecutive green sentences)
+        # Step 6: Validate and fix clustering (max 2 consecutive green sentences)
         updated_blocks = self._fix_consecutive_insertions(updated_blocks)
+
+        return updated_blocks
+
+    def _get_all_paragraph_indices(
+        self,
+        blocks: list[ParagraphBlock],
+    ) -> list[int]:
+        """
+        Get indices of ALL body paragraphs in the document.
+
+        Returns indices of non-heading blocks with substantial content (>30 chars).
+        These are the potential insertion points for keyword distribution.
+
+        Args:
+            blocks: Content blocks.
+
+        Returns:
+            List of block indices that are body paragraphs.
+        """
+        paragraph_indices = []
+        for i, block in enumerate(blocks):
+            # Skip headings
+            if block.is_heading:
+                continue
+            # Skip very short blocks (likely captions, etc.)
+            if len(strip_markers(block.text)) < 30:
+                continue
+            paragraph_indices.append(i)
+        return paragraph_indices
+
+    def _calculate_paragraph_interval_insertions(
+        self,
+        paragraph_indices: list[int],
+        insertions: list[str],
+    ) -> dict[int, list[str]]:
+        """
+        Calculate which paragraphs should receive keyword insertions using intervals.
+
+        Algorithm:
+        1. Calculate interval = num_paragraphs / num_insertions
+        2. Place insertions at regular intervals throughout the document
+        3. Ensure no span of 3+ paragraphs is skipped
+        4. If more insertions than paragraphs, distribute multiple per paragraph
+
+        Args:
+            paragraph_indices: Indices of body paragraphs in document.
+            insertions: List of keyword phrases to insert.
+
+        Returns:
+            Dict mapping paragraph index -> list of keywords to insert there.
+        """
+        num_paragraphs = len(paragraph_indices)
+        num_insertions = len(insertions)
+
+        if num_paragraphs == 0 or num_insertions == 0:
+            return {}
+
+        # Initialize assignments
+        assignments: dict[int, list[str]] = {}
+
+        # Calculate ideal interval between insertions
+        # E.g., 15 paragraphs, 10 insertions -> interval of 1.5 paragraphs
+        interval = num_paragraphs / num_insertions
+
+        # Place insertions at calculated intervals
+        for i, keyword in enumerate(insertions):
+            # Calculate target paragraph position (0-indexed within paragraph list)
+            target_position = int(i * interval)
+            # Clamp to valid range
+            target_position = min(target_position, num_paragraphs - 1)
+
+            # Get actual block index from paragraph indices list
+            block_idx = paragraph_indices[target_position]
+
+            # Add to assignments
+            if block_idx not in assignments:
+                assignments[block_idx] = []
+            assignments[block_idx].append(keyword)
+
+        # Step 2: Ensure no span of 3+ consecutive paragraphs is skipped
+        # Walk through paragraphs and fill gaps
+        assignments = self._fill_distribution_gaps(
+            paragraph_indices=paragraph_indices,
+            assignments=assignments,
+            insertions=insertions,
+        )
+
+        return assignments
+
+    def _fill_distribution_gaps(
+        self,
+        paragraph_indices: list[int],
+        assignments: dict[int, list[str]],
+        insertions: list[str],
+    ) -> dict[int, list[str]]:
+        """
+        Ensure no span of 3+ consecutive paragraphs is skipped.
+
+        If a gap of 3+ paragraphs exists without any insertions,
+        redistribute one insertion from a nearby paragraph with multiple.
+
+        Args:
+            paragraph_indices: Indices of body paragraphs.
+            assignments: Current insertion assignments.
+            insertions: Original list of insertions (for reference).
+
+        Returns:
+            Updated assignments with gaps filled.
+        """
+        if len(paragraph_indices) < 4:
+            return assignments  # Too few paragraphs to have meaningful gaps
+
+        # Find gaps of 3+ consecutive paragraphs without insertions
+        assigned_positions = set()
+        for block_idx in assignments.keys():
+            if block_idx in paragraph_indices:
+                assigned_positions.add(paragraph_indices.index(block_idx))
+
+        # Scan for gaps
+        gap_start = None
+        for pos in range(len(paragraph_indices)):
+            if pos in assigned_positions:
+                # Check if we just ended a gap
+                if gap_start is not None:
+                    gap_length = pos - gap_start
+                    if gap_length >= 3:
+                        # Found a gap of 3+ - insert in the middle of the gap
+                        gap_middle = gap_start + gap_length // 2
+                        gap_block_idx = paragraph_indices[gap_middle]
+
+                        # Find a paragraph with multiple insertions to borrow from
+                        donor_block = None
+                        for block_idx, kws in assignments.items():
+                            if len(kws) > 1:
+                                donor_block = block_idx
+                                break
+
+                        if donor_block and donor_block in assignments:
+                            # Move one keyword from donor to gap
+                            keyword_to_move = assignments[donor_block].pop()
+                            if gap_block_idx not in assignments:
+                                assignments[gap_block_idx] = []
+                            assignments[gap_block_idx].append(keyword_to_move)
+
+                gap_start = None
+            else:
+                if gap_start is None:
+                    gap_start = pos
+
+        # Check for trailing gap
+        if gap_start is not None:
+            gap_length = len(paragraph_indices) - gap_start
+            if gap_length >= 3:
+                gap_middle = gap_start + gap_length // 2
+                gap_block_idx = paragraph_indices[gap_middle]
+
+                # Find a donor
+                for block_idx, kws in assignments.items():
+                    if len(kws) > 1:
+                        keyword_to_move = assignments[block_idx].pop()
+                        if gap_block_idx not in assignments:
+                            assignments[gap_block_idx] = []
+                        assignments[gap_block_idx].append(keyword_to_move)
+                        break
+
+        return assignments
+
+    def _insert_keywords_at_paragraphs(
+        self,
+        blocks: list[ParagraphBlock],
+        insertion_assignments: dict[int, list[str]],
+        topic: str,
+    ) -> list[ParagraphBlock]:
+        """
+        Insert keyword sentences at their assigned paragraph positions.
+
+        Appends generated keyword sentences to the end of each assigned paragraph.
+
+        Args:
+            blocks: Original content blocks.
+            insertion_assignments: Dict mapping block index -> keywords to insert.
+            topic: Content topic for generating sentences.
+
+        Returns:
+            Updated blocks with keywords inserted throughout.
+        """
+        updated_blocks = list(blocks)
+
+        # Get original content for validation
+        full_original_text = getattr(self, '_full_original_text', "")
+
+        # Sort by block index to process in order
+        for block_idx in sorted(insertion_assignments.keys()):
+            keywords = insertion_assignments[block_idx]
+            if not keywords or block_idx >= len(updated_blocks):
+                continue
+
+            # Generate and append sentences for each keyword at this paragraph
+            for keyword in keywords:
+                sentence = self._generate_single_keyword_sentence(keyword, topic)
+                if not sentence:
+                    continue
+
+                # Validate sentence
+                validated, _ = validate_and_fallback(sentence, full_original_text, "keyword_sentence")
+                if validated != sentence:
+                    continue
+
+                # Append to the block
+                block = updated_blocks[block_idx]
+                marked_sentence = f" {ADD_START}{sentence}{ADD_END}"
+                combined_text = normalize_paragraph_spacing(block.text + marked_sentence)
+                updated_blocks[block_idx] = ParagraphBlock(
+                    text=combined_text,
+                    heading_level=block.heading_level,
+                )
 
         return updated_blocks
 
