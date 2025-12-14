@@ -38,7 +38,7 @@ from .llm_client import (
 from .diff_markers import (
     MARK_END as ADD_END,
     MARK_START as ADD_START,
-    compute_markers_v2,  # V2: sentence-level diff (no token-level partial highlights)
+    add_markers_by_diff,  # Token-level diff: only NEW/CHANGED tokens highlighted
     compute_h1_markers,
     inject_phrase_with_markers,
     mark_block_as_new,
@@ -559,28 +559,30 @@ class ContentOptimizer:
         full_original_text: Optional[str] = None,
     ) -> str:
         """
-        V2 Sentence-Level Diff: highlight changed/new ENTIRE sentences.
+        Token-Level Diff: highlight ONLY new/changed tokens.
 
-        This implements the V2 semantics where:
-        - A sentence is either FULLY unchanged (black) or FULLY changed (green)
-        - NO token-level diff inside sentences
-        - Eliminates confusing partial highlights
+        This implements precise token-level diff using SequenceMatcher:
+        - Only tokens that are NEW or CHANGED get highlighted (green)
+        - Original unchanged tokens remain unhighlighted (black)
+        - Prevents the issue where adding a sentence before existing content
+          causes the existing content to also be highlighted
 
         Algorithm:
-        1. Build sentence index from full_original_text
-        2. For each sentence in optimized:
-           - If normalized sentence exists in index → UNCHANGED (black)
-           - Else → CHANGED/NEW → wrap ENTIRE sentence (green)
+        1. Tokenize both original and optimized text
+        2. Use SequenceMatcher to find exact changes
+        3. Only wrap "insert" and "replace" operations in markers
 
         Args:
             original: Original text block.
             optimized: Optimized text (without markers).
-            full_original_text: Full document text for context.
+            full_original_text: Full document text for context (used as baseline).
 
         Returns:
-            Text with markers around changed/new sentences (no partial highlights).
+            Text with markers around ONLY new/changed tokens.
         """
-        return compute_markers_v2(original, optimized, full_original_text=full_original_text)
+        # Compare original block directly against optimized block
+        # This ensures only tokens that changed within THIS block get highlighted
+        return add_markers_by_diff(original, optimized)
 
     def _optimize_body_content(
         self,
