@@ -9,8 +9,14 @@ This module coordinates the optimization process:
 
 IMPORTANT: All keywords are filtered for topical relevance BEFORE optimization
 to prevent injection of off-topic industries or spammy content.
+
+BRAND NAME PROTECTION:
+- Brand names are detected from URL domain and content
+- Original brand spelling is preserved throughout optimization
+- Brand names are excluded from diff highlighting
 """
 
+import re
 from typing import Optional, Union
 
 from .analysis import (
@@ -44,6 +50,9 @@ from .diff_markers import (
     mark_block_as_new,
     build_original_sentence_index,
     normalize_sentence,
+    generate_brand_variations,  # Brand exclusion: generate all variations of brand name
+    normalize_brand_in_text,  # Brand exclusion: normalize brand to original spelling
+    normalize_paragraph_spacing,  # Paragraph structure: fix "word.Word" patterns
 )
 from .models import (
     ContentAudit,
@@ -238,13 +247,15 @@ class ContentOptimizer:
         # Extract content topics for LLM context
         content_topics = get_content_topics(full_text, top_n=15)
 
-        # Step 0.6: Brand name detection and control
-        brand_name = self._detect_brand_name(content)
+        # Step 0.6: Brand name detection and control (with exclusion system)
+        brand_name, brand_variations = self._detect_brand_name(content, full_text)
         brand_count = full_text.lower().count(brand_name.lower()) if brand_name else 0
         self._brand_context = {
             "name": brand_name,
             "original_count": brand_count,
             "max_extra_mentions": min(3, max(1, brand_count)),
+            "variations": brand_variations,  # For diff exclusion
+            "original_spelling": brand_name,  # Exact original spelling to preserve
         }
 
         # Step 1: Analyze content (with filtered keywords)
@@ -353,6 +364,26 @@ class ContentOptimizer:
             blocks=optimized_blocks,
             keyword_plan=keyword_plan,
             topic=analysis.topic,
+        )
+
+        # Step 7.5: ENFORCE keyword count for primary keyword
+        # Get target count from manual_keywords config or use default (6)
+        target_count = manual_keywords.target_count if manual_keywords else 6
+        optimized_blocks = self._enforce_keyword_count(
+            meta_elements=meta_elements,
+            blocks=optimized_blocks,
+            keyword_plan=keyword_plan,
+            target_count=target_count,
+            topic=analysis.topic,
+        )
+
+        # Step 7.6: ENFORCE keyword counts for secondary keywords
+        # Default target for secondary keywords is 3 occurrences each
+        optimized_blocks = self._enforce_secondary_keyword_counts(
+            blocks=optimized_blocks,
+            keyword_plan=keyword_plan,
+            topic=analysis.topic,
+            secondary_target=3,  # Each secondary keyword should appear at least 3 times
         )
 
         # Step 8: Compute keyword usage counts in final output
@@ -475,6 +506,15 @@ class ContentOptimizer:
         # Do this BEFORE adding markers so the injection is clean
         optimized_title_raw = ensure_keyword_in_text(optimized_title_raw, primary, position="start")
 
+        # BRAND NAME NORMALIZATION: Ensure LLM output uses original brand spelling
+        # This prevents "Cell-Gate" when original says "CellGate"
+        if self._brand_context and self._brand_context.get("name"):
+            optimized_title_raw = normalize_brand_in_text(
+                optimized_title_raw,
+                self._brand_context["name"],
+                self._brand_context.get("variations", set()),
+            )
+
         # V2: Sentence-level diff - entire element is all-or-nothing
         # For short elements like titles, if changed at all, wrap entire thing
         if normalize_sentence(current_title or "") != normalize_sentence(optimized_title_raw):
@@ -505,6 +545,14 @@ class ContentOptimizer:
         )
         # DETERMINISTIC KEYWORD GUARANTEE: Primary keyword MUST appear
         optimized_desc_raw = ensure_keyword_in_text(optimized_desc_raw, primary, position="start")
+
+        # BRAND NAME NORMALIZATION: Ensure LLM output uses original brand spelling
+        if self._brand_context and self._brand_context.get("name"):
+            optimized_desc_raw = normalize_brand_in_text(
+                optimized_desc_raw,
+                self._brand_context["name"],
+                self._brand_context.get("variations", set()),
+            )
 
         # V2: Sentence-level diff - entire element is all-or-nothing for meta desc
         if normalize_sentence(current_meta_desc or "") != normalize_sentence(optimized_desc_raw):
@@ -537,6 +585,14 @@ class ContentOptimizer:
         # DETERMINISTIC KEYWORD GUARANTEE: Primary keyword MUST appear (Tier 2)
         optimized_h1_raw = ensure_keyword_in_text(optimized_h1_raw, primary, position="start")
 
+        # BRAND NAME NORMALIZATION: Ensure LLM output uses original brand spelling
+        if self._brand_context and self._brand_context.get("name"):
+            optimized_h1_raw = normalize_brand_in_text(
+                optimized_h1_raw,
+                self._brand_context["name"],
+                self._brand_context.get("variations", set()),
+            )
+
         # Use special H1 marker handling:
         # If H1 changed at all, wrap ENTIRE H1 in markers (not just changed phrases)
         optimized_h1 = compute_h1_markers(current_h1 or "", optimized_h1_raw)
@@ -566,11 +622,13 @@ class ContentOptimizer:
         - Original unchanged tokens remain unhighlighted (black)
         - Prevents the issue where adding a sentence before existing content
           causes the existing content to also be highlighted
+        - BRAND NAMES are EXCLUDED from highlighting (never shown as changes)
 
         Algorithm:
         1. Tokenize both original and optimized text
         2. Use SequenceMatcher to find exact changes
         3. Only wrap "insert" and "replace" operations in markers
+        4. Skip highlighting for brand name variations
 
         Args:
             original: Original text block.
@@ -580,9 +638,24 @@ class ContentOptimizer:
         Returns:
             Text with markers around ONLY new/changed tokens.
         """
+        # Get brand variations for exclusion (if available)
+        brand_variations = None
+        brand_context = getattr(self, '_brand_context', None)
+        if brand_context:
+            brand_variations = brand_context.get('variations')
+            original_spelling = brand_context.get('original_spelling')
+
+            # Normalize brand names in optimized text to match original spelling
+            if original_spelling and brand_variations:
+                optimized = normalize_brand_in_text(optimized, original_spelling, brand_variations)
+
+        # Normalize paragraph spacing to fix "word.Word" patterns from LLM output
+        optimized = normalize_paragraph_spacing(optimized)
+
         # Compare original block directly against optimized block
         # This ensures only tokens that changed within THIS block get highlighted
-        return add_markers_by_diff(original, optimized)
+        # Brand variations are excluded from highlighting
+        return add_markers_by_diff(original, optimized, brand_variations=brand_variations)
 
     def _optimize_body_content(
         self,
@@ -1064,6 +1137,319 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
                 sentences.append(f"Learn more about {kw} and how it relates to {topic}.")
             return sentences
 
+    def _enforce_keyword_count(
+        self,
+        meta_elements: list[MetaElement],
+        blocks: list[ParagraphBlock],
+        keyword_plan: KeywordPlan,
+        target_count: int,
+        topic: str,
+    ) -> list[ParagraphBlock]:
+        """
+        Enforce minimum keyword count for the primary keyword.
+
+        After optimization, count actual keyword occurrences. If below target,
+        insert additional natural usages distributed throughout the content.
+
+        Target locations (6 total):
+        - Title tag (1) - already handled in meta optimization
+        - Meta description (1) - already handled in meta optimization
+        - H1 (1) - already handled in meta optimization
+        - First paragraph (1) - check/add here
+        - Middle content (1) - check/add here
+        - Closing paragraph (1) - check/add here
+
+        Args:
+            meta_elements: Optimized meta elements.
+            blocks: Optimized content blocks.
+            keyword_plan: The keyword plan.
+            target_count: Target number of keyword occurrences (default: 6).
+            topic: Content topic for generating natural sentences.
+
+        Returns:
+            Updated blocks with additional keyword occurrences if needed.
+        """
+        primary_keyword = keyword_plan.primary.phrase
+
+        # Count current occurrences across all content
+        meta_text = " ".join(
+            f"{elem.optimized_title or ''} {elem.optimized_meta_description or ''} {elem.optimized_h1 or ''}"
+            for elem in meta_elements
+        )
+        body_text = " ".join(strip_markers(block.text) for block in blocks)
+        full_text = f"{meta_text} {body_text}".lower()
+
+        current_count = full_text.count(primary_keyword.lower())
+
+        # If we've already met the target, no action needed
+        if current_count >= target_count:
+            return blocks
+
+        # Calculate how many more we need
+        needed = target_count - current_count
+
+        # Identify strategic insertion points in body content
+        # We'll try to insert in: first paragraph, middle content, closing paragraph
+        insertion_points = self._identify_keyword_insertion_points(blocks)
+
+        # Generate additional sentences with the primary keyword
+        additional_sentences = self._generate_keyword_sentences(
+            keyword=primary_keyword,
+            count=needed,
+            topic=topic,
+        )
+
+        if not additional_sentences:
+            return blocks
+
+        # Insert sentences at strategic points
+        updated_blocks = self._insert_keyword_sentences(
+            blocks=blocks,
+            sentences=additional_sentences,
+            insertion_points=insertion_points,
+        )
+
+        return updated_blocks
+
+    def _enforce_secondary_keyword_counts(
+        self,
+        blocks: list[ParagraphBlock],
+        keyword_plan: KeywordPlan,
+        topic: str,
+        secondary_target: int = 3,
+    ) -> list[ParagraphBlock]:
+        """
+        Enforce minimum keyword count for secondary keywords.
+
+        After optimization, count actual keyword occurrences for each secondary keyword.
+        If below target, insert additional natural usages distributed throughout the content.
+
+        Default target for secondary keywords is 3 occurrences each.
+
+        Args:
+            blocks: Optimized content blocks.
+            keyword_plan: The keyword plan with secondary keywords.
+            topic: Content topic for generating natural sentences.
+            secondary_target: Target occurrences for each secondary keyword (default: 3).
+
+        Returns:
+            Updated blocks with additional secondary keyword occurrences if needed.
+        """
+        if not keyword_plan.secondary:
+            return blocks
+
+        updated_blocks = list(blocks)
+
+        # Process each secondary keyword
+        for secondary_kw in keyword_plan.secondary:
+            keyword_phrase = secondary_kw.phrase
+
+            # Count current occurrences in body content
+            body_text = " ".join(strip_markers(block.text) for block in updated_blocks).lower()
+            current_count = body_text.count(keyword_phrase.lower())
+
+            # If we've already met the target, skip this keyword
+            if current_count >= secondary_target:
+                continue
+
+            # Calculate how many more we need
+            needed = secondary_target - current_count
+
+            # Identify strategic insertion points
+            insertion_points = self._identify_keyword_insertion_points(updated_blocks)
+
+            # Generate additional sentences with this secondary keyword
+            additional_sentences = self._generate_keyword_sentences(
+                keyword=keyword_phrase,
+                count=needed,
+                topic=topic,
+            )
+
+            if not additional_sentences:
+                continue
+
+            # Insert sentences at strategic points
+            updated_blocks = self._insert_keyword_sentences(
+                blocks=updated_blocks,
+                sentences=additional_sentences,
+                insertion_points=insertion_points,
+            )
+
+        return updated_blocks
+
+    def _identify_keyword_insertion_points(
+        self,
+        blocks: list[ParagraphBlock],
+    ) -> dict[str, int]:
+        """
+        Identify strategic insertion points for additional keyword occurrences.
+
+        Returns indices for: first_paragraph, middle_content, closing_paragraph
+
+        Args:
+            blocks: Content blocks to analyze.
+
+        Returns:
+            Dictionary with insertion point names and block indices.
+        """
+        points = {}
+
+        # Find body paragraphs (non-headings)
+        body_indices = [
+            i for i, block in enumerate(blocks)
+            if not block.is_heading and len(block.text) > 50
+        ]
+
+        if not body_indices:
+            return points
+
+        # First paragraph (after any initial heading)
+        points["first"] = body_indices[0]
+
+        # Middle content (around the middle of body paragraphs)
+        if len(body_indices) >= 3:
+            mid_idx = len(body_indices) // 2
+            points["middle"] = body_indices[mid_idx]
+
+        # Closing paragraph (last substantial paragraph)
+        if len(body_indices) >= 2:
+            points["closing"] = body_indices[-1]
+
+        return points
+
+    def _generate_keyword_sentences(
+        self,
+        keyword: str,
+        count: int,
+        topic: str,
+    ) -> list[str]:
+        """
+        Generate natural sentences containing the primary keyword.
+
+        Args:
+            keyword: The keyword to include in sentences.
+            count: Number of sentences to generate.
+            topic: Content topic for context.
+
+        Returns:
+            List of natural sentences containing the keyword.
+        """
+        if count <= 0:
+            return []
+
+        # Cap at 3 additional sentences to avoid over-optimization
+        count = min(count, 3)
+
+        prompt = f"""Generate {count} short, natural sentence(s) about "{topic}" that naturally include this EXACT keyword phrase: "{keyword}"
+
+CRITICAL REQUIREMENTS:
+1. The keyword phrase "{keyword}" must appear EXACTLY as written in each sentence
+2. Each sentence must be different and add value
+3. Keep each sentence under 25 words
+4. Make sentences feel naturally integrated, not forced
+5. Return ONLY the sentences, one per line
+
+Example output:
+When choosing {keyword}, consider the features that matter most to your needs.
+Professional {keyword} solutions provide reliable security for businesses of all sizes."""
+
+        try:
+            response = self.llm.client.messages.create(
+                model=self.llm.model,
+                max_tokens=300,
+                system="You are a content writer. Generate natural sentences that include specific keyword phrases exactly as provided.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = response.content[0].text.strip()
+
+            # Get original content for validation
+            full_original_text = getattr(self, '_full_original_text', "")
+
+            # Parse sentences
+            sentences = []
+            for line in result.split("\n"):
+                sentence = line.strip()
+                if sentence and keyword.lower() in sentence.lower():
+                    if not sentence.endswith((".", "!", "?")):
+                        sentence += "."
+                    # Validate for blocked terms
+                    validated, _ = validate_and_fallback(sentence, full_original_text, "keyword_sentence")
+                    if validated == sentence:
+                        sentences.append(sentence)
+
+            return sentences[:count]
+
+        except Exception:
+            # Fallback: create simple sentences
+            templates = [
+                f"Understanding {keyword} is essential for making informed decisions.",
+                f"Many professionals recommend {keyword} for improved security.",
+                f"Learn how {keyword} can benefit your specific situation.",
+            ]
+            return templates[:count]
+
+    def _insert_keyword_sentences(
+        self,
+        blocks: list[ParagraphBlock],
+        sentences: list[str],
+        insertion_points: dict[str, int],
+    ) -> list[ParagraphBlock]:
+        """
+        Insert keyword sentences at strategic points in the content.
+
+        Args:
+            blocks: Original content blocks.
+            sentences: Sentences to insert.
+            insertion_points: Dictionary of insertion point names to block indices.
+
+        Returns:
+            Updated blocks with sentences inserted.
+        """
+        if not sentences or not insertion_points:
+            return blocks
+
+        # Create a copy of blocks to modify
+        updated_blocks = list(blocks)
+
+        # Map sentences to insertion points (prioritize closing, then middle, then first)
+        point_order = ["closing", "middle", "first"]
+        available_points = [p for p in point_order if p in insertion_points]
+
+        # Track offset from insertions
+        offset = 0
+
+        for i, sentence in enumerate(sentences):
+            if i >= len(available_points):
+                # More sentences than insertion points - append to end of last point's block
+                if available_points:
+                    point = available_points[-1]
+                    idx = insertion_points[point] + offset
+                    if idx < len(updated_blocks):
+                        block = updated_blocks[idx]
+                        # Append marked sentence to existing block
+                        marked_sentence = f" {ADD_START}{sentence}{ADD_END}"
+                        combined_text = normalize_paragraph_spacing(block.text + marked_sentence)
+                        updated_blocks[idx] = ParagraphBlock(
+                            text=combined_text,
+                            heading_level=block.heading_level,
+                        )
+                continue
+
+            point = available_points[i]
+            idx = insertion_points[point] + offset
+
+            if idx < len(updated_blocks):
+                block = updated_blocks[idx]
+                # Append marked sentence to existing block
+                marked_sentence = f" {ADD_START}{sentence}{ADD_END}"
+                combined_text = normalize_paragraph_spacing(block.text + marked_sentence)
+                updated_blocks[idx] = ParagraphBlock(
+                    text=combined_text,
+                    heading_level=block.heading_level,
+                )
+
+        return updated_blocks
+
     def _generate_faq(
         self,
         topic: str,
@@ -1119,6 +1505,14 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
         # SAFETY: Validate FAQ items for blocked industry terms
         # Filter out any FAQs that introduce off-topic industries
         valid_faqs, _ = validate_faq_items(faq_data, full_original_text)
+
+        # BRAND NAME NORMALIZATION: Ensure LLM output uses original brand spelling
+        if brand_context and brand_context.get("name"):
+            brand_name = brand_context["name"]
+            brand_variations = brand_context.get("variations", set())
+            for item in valid_faqs:
+                item["question"] = normalize_brand_in_text(item["question"], brand_name, brand_variations)
+                item["answer"] = normalize_brand_in_text(item["answer"], brand_name, brand_variations)
 
         # Wrap FAQ items in markers - all FAQ content is new and should be highlighted
         return [
@@ -1268,24 +1662,30 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
     def _detect_brand_name(
         self,
         content: Union[PageMeta, DocxContent],
-    ) -> str:
+        full_text: str = "",
+    ) -> tuple[str, set[str]]:
         """
-        Detect the brand/company name from the content.
+        Detect the brand/company name from the content and find its ORIGINAL spelling.
+
+        BRAND NAME PROTECTION: This method finds exactly how the brand is spelled
+        in the original content, so we can preserve that spelling and exclude
+        brand name variations from diff highlighting.
 
         Uses multiple signals:
-        - URL domain (most reliable)
+        - URL domain (to identify potential brand)
         - H1 heading
         - Title tag
+        - Full text content (to find original spelling)
 
         Args:
             content: The content being optimized.
+            full_text: Full text of the content for finding original spelling.
 
         Returns:
-            Detected brand name or empty string.
+            Tuple of (original_brand_spelling, set_of_variations).
         """
-        import re
-
         brand_name = ""
+        brand_base = ""  # Base brand name to search for variations
 
         if isinstance(content, PageMeta):
             # Try to extract from URL domain
@@ -1297,25 +1697,21 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
                     # Remove www. and .com/.io/.net etc
                     domain = re.sub(r'^www\.', '', domain)
                     domain = re.sub(r'\.(com|io|net|org|co|ai)$', '', domain)
-                    # Capitalize as brand name
-                    brand_name = domain.title()
+                    # Store base brand (may be hyphenated like "cell-gate")
+                    brand_base = domain
                 except Exception:
                     pass
 
-            # Fallback: look at H1 or title
-            if not brand_name:
-                # Look for common brand patterns in H1/title
+            # Fallback: look at H1 or title for brand base
+            if not brand_base:
                 h1 = content.h1 or ""
                 title = content.title or ""
-
-                # Look for capitalized words at start of title
                 for text in [title, h1]:
                     words = text.split()
                     if words:
-                        # First capitalized word is often the brand
                         first_word = words[0].strip(":|–-")
                         if first_word and first_word[0].isupper():
-                            brand_name = first_word
+                            brand_base = first_word.lower()
                             break
 
         elif isinstance(content, DocxContent):
@@ -1325,9 +1721,60 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
             if words:
                 first_word = words[0].strip(":|–-")
                 if first_word and first_word[0].isupper():
-                    brand_name = first_word
+                    brand_base = first_word.lower()
 
-        return brand_name
+        if not brand_base:
+            return ("", set())
+
+        # Generate all possible variations of the brand name
+        brand_variations = generate_brand_variations(brand_base)
+
+        # Now search the content to find the ORIGINAL spelling
+        # Priority: H1 > Title > Meta Description > First occurrence in body
+        search_texts = []
+        if isinstance(content, PageMeta):
+            if content.h1:
+                search_texts.append(content.h1)
+            if content.title:
+                search_texts.append(content.title)
+            if content.meta_description:
+                search_texts.append(content.meta_description)
+        elif isinstance(content, DocxContent):
+            if content.h1:
+                search_texts.append(content.h1)
+
+        # Add full text as last resort
+        if full_text:
+            search_texts.append(full_text)
+
+        # Search for original spelling in content
+        for text in search_texts:
+            # Try to find any variation in this text
+            for variation in sorted(brand_variations, key=len, reverse=True):
+                # Case-insensitive search
+                pattern = re.compile(re.escape(variation), re.IGNORECASE)
+                match = pattern.search(text)
+                if match:
+                    # Found it! Use the EXACT spelling as it appears in content
+                    brand_name = match.group(0)
+                    break
+            if brand_name:
+                break
+
+        # If still not found, use the domain-derived version
+        if not brand_name and brand_base:
+            # Convert hyphenated domain to CamelCase as default
+            parts = re.split(r'[-\s]+', brand_base)
+            brand_name = ''.join(p.capitalize() for p in parts)
+
+        # Regenerate variations based on the detected original spelling
+        # to ensure the original is included
+        if brand_name:
+            brand_variations = generate_brand_variations(brand_name)
+            # Always add the exact original
+            brand_variations.add(brand_name.lower())
+
+        return (brand_name, brand_variations)
 
 
 def optimize_content(

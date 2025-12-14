@@ -69,6 +69,125 @@ PUNCT_NORMALIZE_MAP = str.maketrans({
 })
 
 
+def generate_brand_variations(brand_name: str) -> set[str]:
+    """
+    Generate all common variations of a brand name for exclusion matching.
+
+    Given a brand name like "CellGate", generates:
+    - CellGate, cellgate, CELLGATE (case variations)
+    - Cell-Gate, cell-gate, CELL-GATE (hyphenated)
+    - Cell Gate, cell gate, CELL GATE (spaced)
+
+    Args:
+        brand_name: The original brand name.
+
+    Returns:
+        Set of all brand name variations (lowercase for comparison).
+    """
+    if not brand_name:
+        return set()
+
+    variations = set()
+
+    # Clean the input brand name
+    clean_brand = brand_name.strip()
+    if not clean_brand:
+        return variations
+
+    # Add the original as-is
+    variations.add(clean_brand.lower())
+
+    # Split on common separators (hyphen, space) and CamelCase
+    import re as _re
+
+    # Split CamelCase: "CellGate" -> ["Cell", "Gate"]
+    parts = _re.findall(r'[A-Z][a-z]*|[a-z]+|[A-Z]+(?=[A-Z][a-z]|\b)', clean_brand)
+
+    # If no CamelCase parts found, try splitting on hyphens/spaces
+    if len(parts) <= 1:
+        parts = _re.split(r'[-\s]+', clean_brand)
+
+    if len(parts) >= 2:
+        # Generate variations from parts
+        # CamelCase: CellGate
+        camel = ''.join(p.capitalize() for p in parts)
+        variations.add(camel.lower())
+
+        # Hyphenated: Cell-Gate
+        hyphenated = '-'.join(p.capitalize() for p in parts)
+        variations.add(hyphenated.lower())
+
+        # Spaced: Cell Gate
+        spaced = ' '.join(p.capitalize() for p in parts)
+        variations.add(spaced.lower())
+
+        # All lowercase joined: cellgate
+        variations.add(''.join(parts).lower())
+
+        # All uppercase: CELLGATE
+        variations.add(''.join(parts).upper().lower())  # Store lowercase for comparison
+
+    return variations
+
+
+def normalize_brand_in_text(text: str, original_brand: str, brand_variations: set[str]) -> str:
+    """
+    Normalize all brand name variations in text to match the original spelling.
+
+    This ensures the LLM output uses the EXACT original brand spelling,
+    preventing diff from detecting brand name changes.
+
+    Args:
+        text: Text that may contain brand variations.
+        original_brand: The original brand name spelling to use.
+        brand_variations: Set of lowercase brand variations to match.
+
+    Returns:
+        Text with all brand variations normalized to original spelling.
+    """
+    if not text or not original_brand or not brand_variations:
+        return text
+
+    import re as _re
+
+    result = text
+
+    # Sort variations by length (longest first) to avoid partial replacements
+    sorted_variations = sorted(brand_variations, key=len, reverse=True)
+
+    for variation in sorted_variations:
+        # Create case-insensitive pattern for this variation
+        # Escape special regex chars in the variation
+        pattern = _re.escape(variation)
+        # Find all occurrences (case-insensitive)
+        matches = list(_re.finditer(pattern, result, flags=_re.IGNORECASE))
+
+        # Replace from end to start to preserve indices
+        for match in reversed(matches):
+            result = result[:match.start()] + original_brand + result[match.end():]
+
+    return result
+
+
+def is_brand_token(token: str, brand_variations: set[str]) -> bool:
+    """
+    Check if a token is a brand name variation.
+
+    Args:
+        token: Token to check.
+        brand_variations: Set of lowercase brand variations.
+
+    Returns:
+        True if token is a brand name variation.
+    """
+    if not token or not brand_variations:
+        return False
+
+    # Normalize token for comparison (strip punctuation, lowercase)
+    clean_token = token.strip('.,;:!?()[]{}"\'-').lower()
+    return clean_token in brand_variations
+
+
 def normalize_token_for_diff(token: str) -> str:
     """
     Normalize a token for diff comparison purposes.
@@ -188,7 +307,11 @@ def tokenize(text: str) -> list[str]:
     return TOKEN_RE.findall(text)
 
 
-def add_markers_by_diff(original: str, rewritten: str) -> str:
+def add_markers_by_diff(
+    original: str,
+    rewritten: str,
+    brand_variations: Optional[set[str]] = None,
+) -> str:
     """
     Compare original and rewritten text and return rewritten text with
     [[[ADD]]]/[[[ENDADD]]] markers around inserted/replaced segments.
@@ -197,10 +320,13 @@ def add_markers_by_diff(original: str, rewritten: str) -> str:
     - Only real inserted/replaced tokens get wrapped
     - Any token that existed unchanged in original remains unwrapped
     - No more "highlighting existing keywords" problem
+    - Brand name variations are NEVER highlighted (excluded from diff)
 
     Args:
         original: The original text before optimization.
         rewritten: The rewritten/optimized text (plain, no markers).
+        brand_variations: Optional set of lowercase brand name variations to exclude
+                         from highlighting. E.g., {"cellgate", "cell-gate", "cell gate"}
 
     Returns:
         The rewritten text with markers around changed portions.
@@ -238,7 +364,31 @@ def add_markers_by_diff(original: str, rewritten: str) -> str:
                 in_add = False
             out.extend(new_tokens[j1:j2])
         elif tag in {"insert", "replace"}:
-            # Open add block if not already in one
+            # Check if this is a brand name variation change (should NOT be highlighted)
+            if brand_variations and tag == "replace":
+                # Check if ALL replaced tokens are brand variations on both sides
+                orig_segment = orig_tokens[i1:i2]
+                new_segment = new_tokens[j1:j2]
+
+                # Check if both segments are brand name variations
+                orig_is_brand = all(
+                    is_brand_token(t, brand_variations) or t.isspace()
+                    for t in orig_segment
+                )
+                new_is_brand = all(
+                    is_brand_token(t, brand_variations) or t.isspace()
+                    for t in new_segment
+                )
+
+                if orig_is_brand and new_is_brand:
+                    # This is a brand name change - treat as equal (no highlighting)
+                    if in_add:
+                        out.append(MARK_END)
+                        in_add = False
+                    out.extend(new_tokens[j1:j2])
+                    continue
+
+            # Regular insert/replace - highlight it
             if not in_add:
                 out.append(MARK_START)
                 in_add = True
@@ -319,6 +469,63 @@ def strip_markers(text: str) -> str:
         Text with markers removed.
     """
     return text.replace(MARK_START, "").replace(MARK_END, "")
+
+
+def normalize_paragraph_spacing(text: str) -> str:
+    """
+    Normalize text to ensure proper spacing and paragraph structure.
+
+    This function fixes common issues that cause text to run together:
+    - Missing space after sentence-ending punctuation (e.g., "word.Word" → "word. Word")
+    - Multiple spaces collapsed to single space (except newlines)
+    - Proper spacing around markers
+
+    Args:
+        text: Text that may have spacing issues.
+
+    Returns:
+        Text with proper spacing between sentences and paragraphs.
+    """
+    if not text:
+        return text
+
+    # First, handle spacing after sentence-ending punctuation
+    # Fix "word.Word" patterns - add space after .!? when followed by capital letter
+    # But don't break abbreviations like "U.S." or "Dr."
+    result = re.sub(
+        r'([.!?])([A-Z])',
+        r'\1 \2',
+        text
+    )
+
+    # Fix missing space after sentence punctuation when followed by lowercase
+    # (rare but can happen with typos)
+    result = re.sub(
+        r'([.!?])([a-z])',
+        r'\1 \2',
+        result
+    )
+
+    # Collapse multiple spaces (but preserve newlines)
+    result = re.sub(r'[ \t]+', ' ', result)
+
+    # Ensure proper spacing around markers
+    # Fix "[[[ADD]]]word" → "[[[ADD]]]word" (markers should not have leading/trailing spaces inside)
+    # Fix "word[[[ADD]]]" → "word [[[ADD]]]" (ensure space before marker if needed)
+    result = re.sub(
+        rf'([^\s\[])({re.escape(MARK_START)})',
+        r'\1 \2',
+        result
+    )
+
+    # Fix marker followed immediately by word without space (if no space after marker end)
+    result = re.sub(
+        rf'({re.escape(MARK_END)})([^\s\]\.\,\!\?\;\:])',
+        r'\1 \2',
+        result
+    )
+
+    return result.strip()
 
 
 def mark_block_as_new(text: str) -> str:

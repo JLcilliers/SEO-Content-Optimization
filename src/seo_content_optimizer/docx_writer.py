@@ -22,6 +22,7 @@ from docx.shared import Inches, Pt, Twips
 from docx.text.paragraph import Paragraph
 
 from .llm_client import ADD_END, ADD_START
+from .diff_markers import normalize_paragraph_spacing
 from .models import (
     ContentBlock,
     ContentBlockType,
@@ -533,6 +534,9 @@ class DocxWriter:
         # IMPORTANT: Normalize markers BEFORE splitting on newlines
         # This ensures markers don't get broken across lines
         text = _normalize_markers_for_newlines(text)
+
+        # Final safety net: Fix "word.Word" patterns and spacing issues
+        text = normalize_paragraph_spacing(text)
 
         if "\n" not in text:
             # No newlines - just add as single paragraph

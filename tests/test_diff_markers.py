@@ -1166,3 +1166,243 @@ class TestV2CellGateScenario:
             # The count should be 1 (one marker pair for the whole sentence)
             assert result.count(MARK_START) == 1
             assert result.count(MARK_END) == 1
+
+
+class TestNormalizeParagraphSpacing:
+    """Tests for the normalize_paragraph_spacing function.
+
+    Bug #3: Text running together without proper line breaks.
+    This function fixes "word.Word" patterns and spacing issues.
+    """
+
+    def test_empty_string(self):
+        """Empty string returns empty string."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+        assert normalize_paragraph_spacing("") == ""
+
+    def test_normal_text_unchanged(self):
+        """Properly spaced text should remain unchanged."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+        text = "This is a sentence. This is another sentence."
+        result = normalize_paragraph_spacing(text)
+        assert result == text
+
+    def test_fixes_word_dot_capital(self):
+        """Should fix 'word.Word' patterns (missing space after period)."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+        text = "First sentence.Second sentence."
+        result = normalize_paragraph_spacing(text)
+        assert result == "First sentence. Second sentence."
+
+    def test_fixes_word_exclamation_capital(self):
+        """Should fix 'word!Word' patterns."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+        text = "Amazing!This is great."
+        result = normalize_paragraph_spacing(text)
+        assert result == "Amazing! This is great."
+
+    def test_fixes_word_question_capital(self):
+        """Should fix 'word?Word' patterns."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+        text = "How does this work?It's quite simple."
+        result = normalize_paragraph_spacing(text)
+        assert result == "How does this work? It's quite simple."
+
+    def test_fixes_word_dot_lowercase(self):
+        """Should fix 'word.word' patterns (lowercase after period)."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+        text = "First sentence.second part."
+        result = normalize_paragraph_spacing(text)
+        assert result == "First sentence. second part."
+
+    def test_collapses_multiple_spaces(self):
+        """Should collapse multiple spaces to single space."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+        text = "Too   many    spaces."
+        result = normalize_paragraph_spacing(text)
+        assert result == "Too many spaces."
+
+    def test_preserves_newlines(self):
+        """Should preserve newline characters."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+        text = "First paragraph.\n\nSecond paragraph."
+        result = normalize_paragraph_spacing(text)
+        assert "\n\n" in result
+        assert "First paragraph." in result
+        assert "Second paragraph." in result
+
+    def test_handles_markers(self):
+        """Should handle text with markers correctly."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing, MARK_START, MARK_END
+        text = f"Original text.{MARK_START}New sentence.{MARK_END}More text."
+        result = normalize_paragraph_spacing(text)
+        # Should have proper spacing around markers
+        assert "text. " in result or f"text.{MARK_START}" in result  # Space added before marker or marker intact
+        assert MARK_START in result
+        assert MARK_END in result
+
+    def test_strips_leading_trailing_whitespace(self):
+        """Should strip leading/trailing whitespace."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+        text = "  Some text.  "
+        result = normalize_paragraph_spacing(text)
+        assert result == "Some text."
+
+    def test_real_world_llm_output(self):
+        """Test with realistic LLM output that might have issues."""
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+        text = "PTO insurance provides coverage.Professional liability is essential.Consider your options carefully."
+        result = normalize_paragraph_spacing(text)
+        assert ". P" in result  # Space after period before "Professional"
+        assert ". C" in result  # Space after period before "Consider"
+
+    def test_cellgate_specific_issue(self):
+        """Test the specific reported issue from CellGate content.
+
+        Bug #3: Text running together like "your property.External cameras"
+        Should be "your property. External cameras" with proper spacing.
+        """
+        from seo_content_optimizer.diff_markers import normalize_paragraph_spacing
+
+        # Exact reported issue pattern
+        text = "your property.External cameras"
+        result = normalize_paragraph_spacing(text)
+        assert result == "your property. External cameras"
+
+        # More complex version
+        text2 = "Enhance your property.External cameras provide security.CellGate systems offer protection."
+        result2 = normalize_paragraph_spacing(text2)
+        assert ". E" in result2  # Space before "External"
+        assert ". C" in result2  # Space before "CellGate"
+
+
+class TestBrandNameNormalization:
+    """Tests for brand name normalization in LLM output.
+
+    Bug #1: Brand names like "CellGate" being changed to "Cell-Gate"
+    by the LLM and then incorrectly highlighted as changes.
+    """
+
+    def test_normalize_brand_in_text_camelcase_preserved(self):
+        """CellGate should be preserved, not changed to Cell-Gate."""
+        from seo_content_optimizer.diff_markers import normalize_brand_in_text, generate_brand_variations
+
+        original_brand = "CellGate"
+        variations = generate_brand_variations(original_brand)
+
+        # LLM might output "Cell-Gate" when original is "CellGate"
+        llm_output = "Security powered by Cell-Gate systems."
+        result = normalize_brand_in_text(llm_output, original_brand, variations)
+
+        # Should normalize back to original spelling
+        assert "CellGate" in result
+        assert "Cell-Gate" not in result
+
+    def test_normalize_brand_in_text_preserves_other_hyphens(self):
+        """Hyphens not related to brand should be preserved."""
+        from seo_content_optimizer.diff_markers import normalize_brand_in_text, generate_brand_variations
+
+        original_brand = "CellGate"
+        variations = generate_brand_variations(original_brand)
+
+        llm_output = "Cell-Gate offers state-of-the-art security."
+        result = normalize_brand_in_text(llm_output, original_brand, variations)
+
+        # Brand normalized, but "state-of-the-art" preserved
+        assert "CellGate" in result
+        assert "state-of-the-art" in result
+
+    def test_normalize_brand_in_text_case_variations(self):
+        """All case variations should normalize to original."""
+        from seo_content_optimizer.diff_markers import normalize_brand_in_text, generate_brand_variations
+
+        original_brand = "CellGate"
+        variations = generate_brand_variations(original_brand)
+
+        # Test various case issues
+        test_cases = [
+            ("CELLGATE security", "CellGate security"),
+            ("cellgate systems", "CellGate systems"),
+            ("cell-gate products", "CellGate products"),
+        ]
+
+        for input_text, expected in test_cases:
+            result = normalize_brand_in_text(input_text, original_brand, variations)
+            assert original_brand in result, f"Failed for input: {input_text}"
+
+    def test_normalize_brand_in_text_empty_brand(self):
+        """Empty brand name should return text unchanged."""
+        from seo_content_optimizer.diff_markers import normalize_brand_in_text
+
+        text = "Some text here."
+        result = normalize_brand_in_text(text, "", set())
+        assert result == text
+
+    def test_normalize_brand_in_text_no_brand_in_text(self):
+        """Text without brand should remain unchanged."""
+        from seo_content_optimizer.diff_markers import normalize_brand_in_text, generate_brand_variations
+
+        original_brand = "CellGate"
+        variations = generate_brand_variations(original_brand)
+
+        text = "Security cameras are essential for property."
+        result = normalize_brand_in_text(text, original_brand, variations)
+        assert result == text
+
+    def test_generate_brand_variations_camelcase(self):
+        """Generate variations from CamelCase brand."""
+        from seo_content_optimizer.diff_markers import generate_brand_variations
+
+        variations = generate_brand_variations("CellGate")
+
+        # Should include various forms
+        assert "cellgate" in variations
+        assert "cell-gate" in variations or "cell gate" in variations
+
+    def test_generate_brand_variations_hyphenated(self):
+        """Generate variations from hyphenated brand."""
+        from seo_content_optimizer.diff_markers import generate_brand_variations
+
+        variations = generate_brand_variations("Cell-Gate")
+
+        # Should include various forms
+        assert "cell-gate" in variations
+        assert "cellgate" in variations
+
+    def test_brand_not_highlighted_when_unchanged(self):
+        """Brand name should not be highlighted when unchanged."""
+        from seo_content_optimizer.diff_markers import compute_markers, MARK_START
+
+        original = "CellGate's security cameras are the best."
+        rewritten = "CellGate's security cameras are the best."
+
+        result = compute_markers(original, rewritten)
+
+        # No changes, no markers
+        assert MARK_START not in result
+
+    def test_brand_excluded_from_diff_when_only_brand_case_changed(self):
+        """If only brand case/format changed, it should be normalized, not marked."""
+        from seo_content_optimizer.diff_markers import (
+            normalize_brand_in_text,
+            generate_brand_variations,
+            compute_markers,
+            MARK_START,
+        )
+
+        original_brand = "CellGate"
+        variations = generate_brand_variations(original_brand)
+
+        # Simulate: original has "CellGate", LLM outputs "Cell-Gate"
+        original = "CellGate systems provide security."
+        llm_output = "Cell-Gate systems provide security."
+
+        # First normalize the brand
+        normalized = normalize_brand_in_text(llm_output, original_brand, variations)
+
+        # Should be "CellGate systems provide security." now
+        assert normalized == original
+
+        # Then compute markers - should have no markers
+        result = compute_markers(original, normalized)
+        assert MARK_START not in result

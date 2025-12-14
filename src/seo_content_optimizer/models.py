@@ -209,9 +209,14 @@ class ManualKeywordsConfig:
 
     When provided, bypasses automatic keyword selection and uses
     user-specified keywords directly without filtering or scoring.
+
+    The target_count specifies how many times the primary keyword
+    should appear in the optimized content (default: 6).
+    Target locations: Title (1), Meta (1), H1 (1), First para (1), Middle (1), Closing (1)
     """
     primary: str  # Required primary keyword phrase
     secondary: list[str] = field(default_factory=list)  # Up to 3 secondary keyword phrases
+    target_count: int = 6  # Target occurrences for primary keyword (default: 6)
 
 
 @dataclass
