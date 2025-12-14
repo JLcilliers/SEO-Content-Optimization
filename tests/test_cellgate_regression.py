@@ -436,6 +436,107 @@ class TestSecondaryKeywordEnforcement:
         assert "gate intercom with camera" in plan.all_phrases
 
 
+class TestKeywordPhraseAtomicUnit:
+    """Tests for multi-word keyword phrase atomic unit handling in diff.
+
+    Regression test for Issue 1: Partial keyword phrase highlighting.
+    Problem: The diff algorithm was highlighting partial keyword matches.
+    Example: Keyword is 'gate security camera' but output showed
+    '[gate security]{.mark} camera' instead of treating the whole phrase as a unit.
+    """
+
+    def test_multi_word_keyword_highlighted_as_unit(self):
+        """Multi-word keywords should be highlighted as complete phrases, not partially."""
+        from src.seo_content_optimizer.diff_markers import add_markers_by_diff
+
+        original = "Security cameras are great for homes."
+        rewritten = "Gate security camera systems are great for homes."
+        keywords = ["gate security camera"]
+
+        result = add_markers_by_diff(original, rewritten, keywords=keywords)
+
+        # The keyword "gate security camera" should be treated as a unit
+        # It should NOT be split like "[gate security]{.mark} camera"
+        assert "[gate security]{.mark} camera" not in result
+        assert "[gate]{.mark} security camera" not in result
+        assert "gate [security]{.mark} camera" not in result
+        assert "gate security [camera]{.mark}" not in result
+
+    def test_keyword_phrase_preserved_across_diff(self):
+        """Keyword phrases should remain intact through diff processing."""
+        from src.seo_content_optimizer.diff_markers import add_markers_by_diff
+
+        original = "Property protection is important."
+        rewritten = "Gate intercom with camera provides property protection."
+        keywords = ["gate intercom with camera"]
+
+        result = add_markers_by_diff(original, rewritten, keywords=keywords)
+
+        # The keyword phrase should appear intact (not broken up)
+        # Either fully marked or unmarked, but not partially
+        assert "gate intercom with camera" in result.lower() or "Gate intercom with camera" in result
+
+        # Should NOT have partial marking within the phrase
+        assert "[gate]{.mark} intercom" not in result.lower()
+        assert "gate [intercom]{.mark}" not in result.lower()
+        assert "[gate intercom]{.mark} with" not in result.lower()
+
+    def test_multiple_keyword_phrases_atomic(self):
+        """Multiple multi-word keywords should each be treated as atomic units."""
+        from src.seo_content_optimizer.diff_markers import add_markers_by_diff
+
+        original = "Security is important for property."
+        rewritten = "External cameras and gate intercom systems help with property security."
+        keywords = ["external cameras", "gate intercom", "property security"]
+
+        result = add_markers_by_diff(original, rewritten, keywords=keywords)
+
+        # Each keyword should be intact
+        # Should NOT have partial marking
+        assert "[external]{.mark} cameras" not in result.lower()
+        assert "external [cameras]{.mark}" not in result.lower()
+        assert "[gate]{.mark} intercom" not in result.lower()
+        assert "gate [intercom]{.mark}" not in result.lower()
+
+    def test_preprocessing_restores_keywords_correctly(self):
+        """Preprocessing and postprocessing should restore keywords correctly."""
+        from src.seo_content_optimizer.diff_markers import (
+            preprocess_keywords_for_diff,
+            postprocess_keywords_from_diff,
+        )
+
+        text = "Gate security camera systems are the best for property security."
+        keywords = ["gate security camera", "property security"]
+
+        # Preprocess
+        processed, token_map = preprocess_keywords_for_diff(text, keywords)
+
+        # Keywords should be replaced with tokens
+        assert "gate security camera" not in processed.lower()
+        assert "property security" not in processed.lower()
+        assert "__KWPHRASE_" in processed
+
+        # Postprocess
+        restored = postprocess_keywords_from_diff(processed, token_map)
+
+        # Keywords should be restored
+        assert "gate security camera" in restored.lower() or "Gate security camera" in restored
+        assert "property security" in restored.lower() or "Property security" in restored
+
+    def test_single_word_keywords_unaffected(self):
+        """Single-word keywords should not be affected by preprocessing."""
+        from src.seo_content_optimizer.diff_markers import preprocess_keywords_for_diff
+
+        text = "Camera systems help with security."
+        keywords = ["camera", "security"]  # Single words
+
+        processed, token_map = preprocess_keywords_for_diff(text, keywords)
+
+        # Single-word keywords should NOT be tokenized
+        assert token_map == {}
+        assert processed == text
+
+
 class TestKeywordDistribution:
     """Tests for even keyword distribution throughout the document."""
 

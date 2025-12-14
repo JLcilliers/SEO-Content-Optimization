@@ -213,6 +213,84 @@ def normalize_token_for_diff(token: str) -> str:
     return normalized
 
 
+def preprocess_keywords_for_diff(
+    text: str,
+    keywords: list[str],
+) -> tuple[str, dict[str, str]]:
+    """
+    Replace multi-word keywords with single atomic tokens before diff.
+
+    This ensures multi-word keyword phrases like "gate security camera"
+    are treated as single units during diff comparison, preventing
+    partial highlighting like "[gate security]{.mark} camera".
+
+    Args:
+        text: Text to preprocess.
+        keywords: List of keyword phrases to treat as atomic units.
+
+    Returns:
+        Tuple of (preprocessed_text, token_map) where token_map
+        maps tokens back to original keywords.
+    """
+    if not text or not keywords:
+        return text, {}
+
+    token_map: dict[str, str] = {}
+    result = text
+
+    # Sort keywords by length (longest first) to avoid partial replacements
+    sorted_keywords = sorted(
+        [kw for kw in keywords if kw and " " in kw],  # Only multi-word keywords
+        key=len,
+        reverse=True,
+    )
+
+    for i, keyword in enumerate(sorted_keywords):
+        if not keyword.strip():
+            continue
+
+        # Create unique token for this keyword
+        token = f"__KWPHRASE_{i}__"
+        token_map[token] = keyword
+
+        # Replace all occurrences (case-insensitive, preserve original case)
+        pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+
+        def preserve_case_replace(match: re.Match) -> str:
+            """Replace keeping track for postprocessing."""
+            return token
+
+        result = pattern.sub(preserve_case_replace, result)
+
+    return result, token_map
+
+
+def postprocess_keywords_from_diff(
+    text: str,
+    token_map: dict[str, str],
+) -> str:
+    """
+    Restore original keyword phrases from atomic tokens after diff.
+
+    Reverses the preprocessing done by preprocess_keywords_for_diff.
+
+    Args:
+        text: Text with atomic tokens and markers.
+        token_map: Map from tokens to original keyword phrases.
+
+    Returns:
+        Text with keywords restored.
+    """
+    if not text or not token_map:
+        return text
+
+    result = text
+    for token, keyword in token_map.items():
+        result = result.replace(token, keyword)
+
+    return result
+
+
 def normalize_sentence(s: str) -> str:
     """
     Normalize a sentence for equality comparison.
@@ -311,6 +389,7 @@ def add_markers_by_diff(
     original: str,
     rewritten: str,
     brand_variations: Optional[set[str]] = None,
+    keywords: Optional[list[str]] = None,
 ) -> str:
     """
     Compare original and rewritten text and return rewritten text with
@@ -321,12 +400,15 @@ def add_markers_by_diff(
     - Any token that existed unchanged in original remains unwrapped
     - No more "highlighting existing keywords" problem
     - Brand name variations are NEVER highlighted (excluded from diff)
+    - Multi-word keywords are treated as atomic units (not partially highlighted)
 
     Args:
         original: The original text before optimization.
         rewritten: The rewritten/optimized text (plain, no markers).
         brand_variations: Optional set of lowercase brand name variations to exclude
                          from highlighting. E.g., {"cellgate", "cell-gate", "cell gate"}
+        keywords: Optional list of keyword phrases to treat as atomic units.
+                  Multi-word keywords will not be partially highlighted.
 
     Returns:
         The rewritten text with markers around changed portions.
@@ -344,8 +426,20 @@ def add_markers_by_diff(
     if original.strip() == rewritten.strip():
         return rewritten
 
-    orig_tokens = tokenize(original)
-    new_tokens = tokenize(rewritten)
+    # Preprocess: Replace multi-word keywords with atomic tokens
+    # This prevents partial highlighting like "[gate security]{.mark} camera"
+    orig_preprocessed = original
+    new_preprocessed = rewritten
+    token_map: dict[str, str] = {}
+
+    if keywords:
+        orig_preprocessed, token_map_orig = preprocess_keywords_for_diff(original, keywords)
+        new_preprocessed, token_map_new = preprocess_keywords_for_diff(rewritten, keywords)
+        # Combine token maps (they should be the same)
+        token_map = {**token_map_orig, **token_map_new}
+
+    orig_tokens = tokenize(orig_preprocessed)
+    new_tokens = tokenize(new_preprocessed)
 
     # Normalize tokens for comparison (handles curly quotes, smart apostrophes, etc.)
     # We compare normalized versions but output the original tokens
@@ -421,6 +515,10 @@ def add_markers_by_diff(
         r"\1",  # Keep the whitespace but remove markers
         result
     )
+
+    # Postprocess: Restore multi-word keywords from atomic tokens
+    if token_map:
+        result = postprocess_keywords_from_diff(result, token_map)
 
     return result
 

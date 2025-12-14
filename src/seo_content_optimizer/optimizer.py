@@ -53,6 +53,8 @@ from .diff_markers import (
     generate_brand_variations,  # Brand exclusion: generate all variations of brand name
     normalize_brand_in_text,  # Brand exclusion: normalize brand to original spelling
     normalize_paragraph_spacing,  # Paragraph structure: fix "word.Word" patterns
+    preprocess_keywords_for_diff,  # Keyword atomic units: preprocess for diff
+    postprocess_keywords_from_diff,  # Keyword atomic units: postprocess after diff
 )
 from .models import (
     ContentAudit,
@@ -274,6 +276,9 @@ class ContentOptimizer:
         # Store content topics and full text for use in LLM calls and validation
         self._content_topics = content_topics
         self._full_original_text = full_text
+
+        # Store keyword plan for use in _compute_markers_v2 (atomic keyword units)
+        self._current_keyword_plan = keyword_plan
 
         # Step 2.5: Run structured content audit (10-Part SEO Framework)
         # This identifies keyword placement gaps and prioritizes issues
@@ -606,6 +611,7 @@ class ContentOptimizer:
         original: str,
         optimized: str,
         full_original_text: Optional[str] = None,
+        keywords: Optional[list[str]] = None,
     ) -> str:
         """
         Token-Level Diff: highlight ONLY new/changed tokens.
@@ -616,17 +622,21 @@ class ContentOptimizer:
         - Prevents the issue where adding a sentence before existing content
           causes the existing content to also be highlighted
         - BRAND NAMES are EXCLUDED from highlighting (never shown as changes)
+        - Multi-word KEYWORDS are treated as ATOMIC UNITS (not partially highlighted)
 
         Algorithm:
-        1. Tokenize both original and optimized text
-        2. Use SequenceMatcher to find exact changes
-        3. Only wrap "insert" and "replace" operations in markers
-        4. Skip highlighting for brand name variations
+        1. Preprocess to replace multi-word keywords with atomic tokens
+        2. Tokenize both original and optimized text
+        3. Use SequenceMatcher to find exact changes
+        4. Only wrap "insert" and "replace" operations in markers
+        5. Skip highlighting for brand name variations
+        6. Postprocess to restore keyword phrases
 
         Args:
             original: Original text block.
             optimized: Optimized text (without markers).
             full_original_text: Full document text for context (used as baseline).
+            keywords: Optional list of keyword phrases to treat as atomic units.
 
         Returns:
             Text with markers around ONLY new/changed tokens.
@@ -645,10 +655,24 @@ class ContentOptimizer:
         # Normalize paragraph spacing to fix "word.Word" patterns from LLM output
         optimized = normalize_paragraph_spacing(optimized)
 
+        # Get keywords for atomic unit treatment if not provided
+        if keywords is None:
+            # Try to get keywords from the keyword plan stored on the optimizer
+            keyword_plan = getattr(self, '_current_keyword_plan', None)
+            if keyword_plan:
+                keywords = [keyword_plan.primary.phrase]
+                keywords.extend([kw.phrase for kw in keyword_plan.secondary])
+
         # Compare original block directly against optimized block
         # This ensures only tokens that changed within THIS block get highlighted
         # Brand variations are excluded from highlighting
-        return add_markers_by_diff(original, optimized, brand_variations=brand_variations)
+        # Multi-word keywords are treated as atomic units (not partially highlighted)
+        return add_markers_by_diff(
+            original,
+            optimized,
+            brand_variations=brand_variations,
+            keywords=keywords,
+        )
 
     def _optimize_body_content(
         self,
