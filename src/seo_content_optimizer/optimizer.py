@@ -33,6 +33,9 @@ from .keyword_filter import (
 )
 from .output_validator import (
     validate_and_fallback,
+    validate_and_preserve,  # Content preservation: fallback if content deleted
+    validate_content_preservation,  # Content preservation: check length ratio
+    validate_block_preservation,  # Content preservation: check block count
     validate_faq_items,
     find_blocked_terms,
 )
@@ -383,6 +386,26 @@ class ContentOptimizer:
             primary_target=target_count,
             secondary_target=3,  # Each secondary keyword should appear at least 3 times
         )
+
+        # Step 7.9: FINAL SAFETY CHECK - Validate content preservation
+        # Ensure total optimized content >= original content (additive only)
+        original_body_length = sum(len(block.text) for block in blocks)
+        optimized_body_length = sum(len(strip_markers(block.text)) for block in optimized_blocks)
+
+        if optimized_body_length < original_body_length * 0.85:
+            # CRITICAL: Content was deleted - fall back to original blocks
+            import sys
+            deletion_pct = (1 - optimized_body_length / original_body_length) * 100 if original_body_length > 0 else 0
+            print(
+                f"CRITICAL: Content deletion detected - "
+                f"original: {original_body_length} chars, "
+                f"optimized: {optimized_body_length} chars "
+                f"({deletion_pct:.1f}% deleted). Falling back to original.",
+                file=sys.stderr
+            )
+            # Fall back to original blocks but keep meta elements
+            # Add minimal keyword markers to original to preserve functionality
+            optimized_blocks = blocks
 
         # Step 8: Compute keyword usage counts in final output
         keyword_usage_counts = self._compute_keyword_usage_counts(
@@ -764,8 +787,9 @@ class ContentOptimizer:
                     content_topics=content_topics,
                     brand_context=getattr(self, '_brand_context', None),
                 )
-                # SAFETY: Validate LLM output for blocked industry terms
-                rewritten_text, _ = validate_and_fallback(
+                # SAFETY: Validate LLM output for blocked terms AND content preservation
+                # Falls back to original if content was deleted or blocked terms added
+                rewritten_text, _, _ = validate_and_preserve(
                     strip_markers(rewritten_text), block.text, f"paragraph_{i+1}"
                 )
                 # V2: Sentence-level diff (full sentences highlighted, no partial)
@@ -796,8 +820,9 @@ class ContentOptimizer:
                     content_topics=content_topics,
                     brand_context=getattr(self, '_brand_context', None),
                 )
-                # SAFETY: Validate LLM output for blocked industry terms
-                rewritten_text, _ = validate_and_fallback(
+                # SAFETY: Validate LLM output for blocked terms AND content preservation
+                # Falls back to original if content was deleted or blocked terms added
+                rewritten_text, _, _ = validate_and_preserve(
                     strip_markers(rewritten_text), block.text, "conclusion"
                 )
                 # V2: Sentence-level diff (full sentences highlighted, no partial)
@@ -835,8 +860,9 @@ class ContentOptimizer:
                         content_topics=content_topics,
                         brand_context=getattr(self, '_brand_context', None),
                     )
-                    # SAFETY: Validate LLM output for blocked industry terms
-                    rewritten_text, _ = validate_and_fallback(
+                    # SAFETY: Validate LLM output for blocked terms AND content preservation
+                    # Falls back to original if content was deleted or blocked terms added
+                    rewritten_text, _, _ = validate_and_preserve(
                         strip_markers(rewritten_text), block.text, f"paragraph_{i+1}"
                     )
                     # V2: Sentence-level diff (full sentences highlighted, no partial)
@@ -867,6 +893,18 @@ class ContentOptimizer:
         optimized_blocks = self._ensure_primary_in_first_100_words(
             optimized_blocks, primary, analysis.topic
         )
+
+        # CONTENT PRESERVATION: Validate block count is preserved
+        # Optimization should be ADDITIVE - never remove blocks
+        block_valid, block_error = validate_block_preservation(
+            blocks, optimized_blocks, "body_content"
+        )
+        if not block_valid:
+            # CRITICAL: Block deletion detected - log error and return original
+            import sys
+            print(f"CRITICAL ERROR: {block_error}", file=sys.stderr)
+            # Fall back to original blocks to prevent data loss
+            return blocks
 
         return optimized_blocks
 
