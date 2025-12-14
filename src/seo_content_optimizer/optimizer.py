@@ -1172,9 +1172,9 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
         primary_keyword = keyword_plan.primary.phrase
 
         # Count current occurrences across all content
+        # MetaElement has .optimized attribute (not .optimized_title etc.)
         meta_text = " ".join(
-            f"{elem.optimized_title or ''} {elem.optimized_meta_description or ''} {elem.optimized_h1 or ''}"
-            for elem in meta_elements
+            elem.optimized or '' for elem in meta_elements
         )
         body_text = " ".join(strip_markers(block.text) for block in blocks)
         full_text = f"{meta_text} {body_text}".lower()
