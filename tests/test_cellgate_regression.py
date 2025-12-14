@@ -439,6 +439,96 @@ class TestSecondaryKeywordEnforcement:
 class TestKeywordDistribution:
     """Tests for even keyword distribution throughout the document."""
 
+    def test_split_into_sections(self):
+        """Verify document is split correctly based on H2 headings."""
+        from src.seo_content_optimizer.optimizer import ContentOptimizer
+
+        optimizer = ContentOptimizer.__new__(ContentOptimizer)
+
+        # Create test document with multiple sections
+        blocks = [
+            ParagraphBlock(text="Main Title", heading_level=HeadingLevel.H1),
+            ParagraphBlock(text="Intro paragraph one."),
+            ParagraphBlock(text="Intro paragraph two."),
+            ParagraphBlock(text="Section One", heading_level=HeadingLevel.H2),
+            ParagraphBlock(text="Section one content."),
+            ParagraphBlock(text="Section Two", heading_level=HeadingLevel.H2),
+            ParagraphBlock(text="Section two content."),
+            ParagraphBlock(text="Section two more content."),
+            ParagraphBlock(text="Section Three", heading_level=HeadingLevel.H2),
+            ParagraphBlock(text="Final content."),
+        ]
+
+        sections = optimizer._split_into_sections(blocks)
+
+        # Should have 4 sections: intro + 3 H2 sections
+        assert len(sections) == 4
+
+        # First section is intro (before first H2)
+        assert sections[0]["is_intro"] is True
+        assert sections[0]["start_idx"] == 0
+        assert sections[0]["end_idx"] == 2  # Blocks 0, 1, 2
+
+        # Other sections are not intro
+        assert sections[1]["is_intro"] is False
+        assert sections[1]["heading"] == "Section One"
+
+    def test_assign_keywords_to_sections_even_distribution(self):
+        """Verify keywords are distributed evenly across sections."""
+        from src.seo_content_optimizer.optimizer import ContentOptimizer
+
+        optimizer = ContentOptimizer.__new__(ContentOptimizer)
+
+        sections = [
+            {"start_idx": 0, "end_idx": 2, "heading": "Intro", "is_intro": True},
+            {"start_idx": 3, "end_idx": 5, "heading": "Section 1", "is_intro": False},
+            {"start_idx": 6, "end_idx": 8, "heading": "Section 2", "is_intro": False},
+            {"start_idx": 9, "end_idx": 11, "heading": "Section 3", "is_intro": False},
+        ]
+
+        # 6 keywords total - should distribute ~1-2 per section
+        keyword_needs = [
+            {"keyword": "primary keyword", "needed": 3, "is_primary": True},
+            {"keyword": "secondary one", "needed": 2, "is_primary": False},
+            {"keyword": "secondary two", "needed": 1, "is_primary": False},
+        ]
+
+        assignments = optimizer._assign_keywords_to_sections(sections, keyword_needs)
+
+        # All sections should have assignments
+        assert len(assignments) == 4
+
+        # Each section should have 1-2 keywords (max 2)
+        for section_idx, keywords in assignments.items():
+            assert len(keywords) <= 2, f"Section {section_idx} has {len(keywords)} keywords, max is 2"
+
+        # Total assigned should equal total needed (6)
+        total_assigned = sum(len(kws) for kws in assignments.values())
+        assert total_assigned == 6
+
+    def test_no_section_gets_zero_if_keywords_available(self):
+        """Verify keywords are spread so no section is left empty if possible."""
+        from src.seo_content_optimizer.optimizer import ContentOptimizer
+
+        optimizer = ContentOptimizer.__new__(ContentOptimizer)
+
+        sections = [
+            {"start_idx": 0, "end_idx": 2, "heading": "Intro", "is_intro": True},
+            {"start_idx": 3, "end_idx": 5, "heading": "Section 1", "is_intro": False},
+            {"start_idx": 6, "end_idx": 8, "heading": "Section 2", "is_intro": False},
+        ]
+
+        # 6 keywords - with 3 sections, each should get 2
+        keyword_needs = [
+            {"keyword": "keyword", "needed": 6, "is_primary": True},
+        ]
+
+        assignments = optimizer._assign_keywords_to_sections(sections, keyword_needs)
+
+        # Each section should have exactly 2 keywords
+        for section_idx, keywords in assignments.items():
+            assert len(keywords) == 2, f"Section {section_idx} should have 2 keywords, has {len(keywords)}"
+
     def test_identify_insertion_points_returns_list(self):
         """Verify _identify_keyword_insertion_points returns a list of indices."""
         from src.seo_content_optimizer.optimizer import ContentOptimizer

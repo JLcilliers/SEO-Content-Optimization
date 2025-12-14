@@ -366,23 +366,16 @@ class ContentOptimizer:
             topic=analysis.topic,
         )
 
-        # Step 7.5: ENFORCE keyword count for primary keyword
-        # Get target count from manual_keywords config or use default (6)
+        # Step 7.5: DISTRIBUTE keywords EVENLY across document sections
+        # This replaces separate primary/secondary enforcement to prevent clustering.
+        # Keywords are distributed across sections based on H2 headings.
         target_count = manual_keywords.target_count if manual_keywords else 6
-        optimized_blocks = self._enforce_keyword_count(
+        optimized_blocks = self._distribute_keywords_across_sections(
             meta_elements=meta_elements,
             blocks=optimized_blocks,
             keyword_plan=keyword_plan,
-            target_count=target_count,
             topic=analysis.topic,
-        )
-
-        # Step 7.6: ENFORCE keyword counts for secondary keywords
-        # Default target for secondary keywords is 3 occurrences each
-        optimized_blocks = self._enforce_secondary_keyword_counts(
-            blocks=optimized_blocks,
-            keyword_plan=keyword_plan,
-            topic=analysis.topic,
+            primary_target=target_count,
             secondary_target=3,  # Each secondary keyword should appear at least 3 times
         )
 
@@ -1274,6 +1267,440 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
                 sentences=additional_sentences,
                 insertion_points=insertion_points,
             )
+
+        return updated_blocks
+
+    def _distribute_keywords_across_sections(
+        self,
+        meta_elements: list[MetaElement],
+        blocks: list[ParagraphBlock],
+        keyword_plan: KeywordPlan,
+        topic: str,
+        primary_target: int = 6,
+        secondary_target: int = 3,
+    ) -> list[ParagraphBlock]:
+        """
+        Distribute ALL keywords EVENLY across document sections.
+
+        This is the UNIFIED keyword distribution method that replaces separate
+        primary/secondary enforcement. It ensures keywords are spread throughout
+        the document, not clustered at beginning/end.
+
+        Algorithm:
+        1. Split document into sections based on H2 headings
+        2. Calculate keyword needs (primary and all secondaries)
+        3. Distribute keywords proportionally across sections
+        4. Insert at section boundaries (end of each section)
+        5. Validate max 2 consecutive green sentences
+
+        Args:
+            meta_elements: Meta elements (to count existing keyword usage).
+            blocks: Content blocks to modify.
+            keyword_plan: All keywords (primary + secondary).
+            topic: Content topic for generating sentences.
+            primary_target: Target count for primary keyword.
+            secondary_target: Target count for each secondary keyword.
+
+        Returns:
+            Updated blocks with keywords evenly distributed.
+        """
+        # Step 1: Split into sections based on H2 headings
+        sections = self._split_into_sections(blocks)
+
+        if not sections:
+            return blocks
+
+        # Step 2: Calculate keyword needs
+        keyword_needs = self._calculate_keyword_needs(
+            meta_elements=meta_elements,
+            blocks=blocks,
+            keyword_plan=keyword_plan,
+            primary_target=primary_target,
+            secondary_target=secondary_target,
+        )
+
+        if not keyword_needs:
+            return blocks  # All keywords already at target
+
+        # Step 3: Create insertion assignments - distribute across sections
+        section_assignments = self._assign_keywords_to_sections(
+            sections=sections,
+            keyword_needs=keyword_needs,
+        )
+
+        # Step 4: Generate sentences and insert at section boundaries
+        updated_blocks = self._insert_keywords_by_section(
+            blocks=blocks,
+            sections=sections,
+            section_assignments=section_assignments,
+            topic=topic,
+        )
+
+        # Step 5: Validate and fix clustering (max 2 consecutive green sentences)
+        updated_blocks = self._fix_consecutive_insertions(updated_blocks)
+
+        return updated_blocks
+
+    def _split_into_sections(
+        self,
+        blocks: list[ParagraphBlock],
+    ) -> list[dict]:
+        """
+        Split document into sections based on H2 headings.
+
+        Each section contains:
+        - start_idx: First block index in section
+        - end_idx: Last block index in section (inclusive)
+        - heading: Section heading text (or "Intro" for first section)
+        - is_intro: Whether this is the intro section (before first H2)
+
+        Args:
+            blocks: Content blocks.
+
+        Returns:
+            List of section dictionaries.
+        """
+        sections = []
+        current_section_start = 0
+        current_heading = "Introduction"
+        is_intro = True
+
+        for i, block in enumerate(blocks):
+            # Check for H2 heading (section boundary)
+            if block.is_heading and block.heading_level == HeadingLevel.H2:
+                # End previous section
+                if i > current_section_start:
+                    sections.append({
+                        "start_idx": current_section_start,
+                        "end_idx": i - 1,
+                        "heading": current_heading,
+                        "is_intro": is_intro,
+                    })
+
+                # Start new section
+                current_section_start = i
+                current_heading = block.text
+                is_intro = False
+
+        # Add final section
+        if current_section_start < len(blocks):
+            sections.append({
+                "start_idx": current_section_start,
+                "end_idx": len(blocks) - 1,
+                "heading": current_heading,
+                "is_intro": is_intro,
+            })
+
+        return sections
+
+    def _calculate_keyword_needs(
+        self,
+        meta_elements: list[MetaElement],
+        blocks: list[ParagraphBlock],
+        keyword_plan: KeywordPlan,
+        primary_target: int,
+        secondary_target: int,
+    ) -> list[dict]:
+        """
+        Calculate how many more occurrences each keyword needs.
+
+        Args:
+            meta_elements: Meta elements to count.
+            blocks: Content blocks to count.
+            keyword_plan: All keywords.
+            primary_target: Target for primary keyword.
+            secondary_target: Target for each secondary keyword.
+
+        Returns:
+            List of {keyword, needed, is_primary} dicts for keywords below target.
+        """
+        # Build full text for counting
+        meta_text = " ".join(elem.optimized or '' for elem in meta_elements)
+        body_text = " ".join(strip_markers(block.text) for block in blocks)
+        full_text = f"{meta_text} {body_text}".lower()
+
+        keyword_needs = []
+
+        # Check primary keyword
+        primary = keyword_plan.primary.phrase
+        current_count = count_keyword_in_text(full_text, primary)
+        if current_count < primary_target:
+            keyword_needs.append({
+                "keyword": primary,
+                "needed": primary_target - current_count,
+                "is_primary": True,
+            })
+
+        # Check secondary keywords
+        for secondary in keyword_plan.secondary:
+            phrase = secondary.phrase
+            current_count = count_keyword_in_text(full_text, phrase)
+            if current_count < secondary_target:
+                keyword_needs.append({
+                    "keyword": phrase,
+                    "needed": secondary_target - current_count,
+                    "is_primary": False,
+                })
+
+        return keyword_needs
+
+    def _assign_keywords_to_sections(
+        self,
+        sections: list[dict],
+        keyword_needs: list[dict],
+    ) -> dict[int, list[str]]:
+        """
+        Distribute keywords EVENLY across sections.
+
+        Algorithm:
+        - Calculate total insertions needed
+        - Divide proportionally across sections (minimum 1 per section if possible)
+        - Rotate through keywords to spread different keywords across sections
+        - Never assign more than 2 insertions to any single section
+
+        Args:
+            sections: Document sections.
+            keyword_needs: Keywords and their needed counts.
+
+        Returns:
+            Dict mapping section index -> list of keywords to insert.
+        """
+        num_sections = len(sections)
+        if num_sections == 0:
+            return {}
+
+        # Build list of all keyword insertions needed (flattened)
+        all_insertions = []
+        for kw_info in keyword_needs:
+            for _ in range(kw_info["needed"]):
+                all_insertions.append(kw_info["keyword"])
+
+        if not all_insertions:
+            return {}
+
+        # Initialize section assignments
+        section_assignments: dict[int, list[str]] = {i: [] for i in range(num_sections)}
+
+        # Distribute evenly: assign insertions round-robin across sections
+        # Start from section 1 (skip intro) if possible, to spread through middle
+        total_insertions = len(all_insertions)
+
+        # Calculate max insertions per section (never more than 2)
+        max_per_section = 2
+
+        # Calculate insertions per section for even distribution
+        base_per_section = total_insertions // num_sections
+        remainder = total_insertions % num_sections
+
+        # Distribute insertions
+        insertion_idx = 0
+        for section_idx in range(num_sections):
+            # How many for this section?
+            count = base_per_section
+            if section_idx < remainder:
+                count += 1
+            count = min(count, max_per_section)  # Cap at 2
+
+            # Assign keywords to this section
+            for _ in range(count):
+                if insertion_idx < len(all_insertions):
+                    section_assignments[section_idx].append(all_insertions[insertion_idx])
+                    insertion_idx += 1
+
+        # If we have leftover insertions (due to max cap), distribute to sections with room
+        while insertion_idx < len(all_insertions):
+            distributed = False
+            for section_idx in range(num_sections):
+                if len(section_assignments[section_idx]) < max_per_section:
+                    section_assignments[section_idx].append(all_insertions[insertion_idx])
+                    insertion_idx += 1
+                    distributed = True
+                    break
+            if not distributed:
+                # All sections at max - stop distributing
+                break
+
+        return section_assignments
+
+    def _insert_keywords_by_section(
+        self,
+        blocks: list[ParagraphBlock],
+        sections: list[dict],
+        section_assignments: dict[int, list[str]],
+        topic: str,
+    ) -> list[ParagraphBlock]:
+        """
+        Insert keyword sentences at section boundaries.
+
+        For each section with assigned keywords, insert sentences at the
+        END of the section (last paragraph before next H2).
+
+        Args:
+            blocks: Original content blocks.
+            sections: Document sections.
+            section_assignments: Keywords assigned to each section.
+            topic: Content topic for generating sentences.
+
+        Returns:
+            Updated blocks with keywords inserted.
+        """
+        updated_blocks = list(blocks)
+
+        # Get original content for validation
+        full_original_text = getattr(self, '_full_original_text', "")
+
+        for section_idx, keywords in section_assignments.items():
+            if not keywords or section_idx >= len(sections):
+                continue
+
+            section = sections[section_idx]
+
+            # Find insertion point: last non-heading paragraph in section
+            insertion_idx = None
+            for i in range(section["end_idx"], section["start_idx"] - 1, -1):
+                if i < len(updated_blocks) and not updated_blocks[i].is_heading:
+                    insertion_idx = i
+                    break
+
+            if insertion_idx is None:
+                continue
+
+            # Generate sentences for each keyword assigned to this section
+            for keyword in keywords:
+                sentence = self._generate_single_keyword_sentence(keyword, topic)
+                if not sentence:
+                    continue
+
+                # Validate sentence
+                validated, _ = validate_and_fallback(sentence, full_original_text, "keyword_sentence")
+                if validated != sentence:
+                    continue
+
+                # Append to the block at insertion point
+                block = updated_blocks[insertion_idx]
+                marked_sentence = f" {ADD_START}{sentence}{ADD_END}"
+                combined_text = normalize_paragraph_spacing(block.text + marked_sentence)
+                updated_blocks[insertion_idx] = ParagraphBlock(
+                    text=combined_text,
+                    heading_level=block.heading_level,
+                )
+
+        return updated_blocks
+
+    def _generate_single_keyword_sentence(
+        self,
+        keyword: str,
+        topic: str,
+    ) -> Optional[str]:
+        """
+        Generate a single natural sentence containing the keyword.
+
+        Args:
+            keyword: Keyword to include.
+            topic: Content topic for context.
+
+        Returns:
+            Generated sentence or None if failed.
+        """
+        prompt = f"""Generate ONE short, natural sentence about "{topic}" that includes this EXACT keyword phrase: "{keyword}"
+
+REQUIREMENTS:
+1. The phrase "{keyword}" must appear EXACTLY as written
+2. Keep the sentence under 20 words
+3. Make it feel naturally integrated
+4. Return ONLY the sentence, nothing else
+
+Example: When considering {keyword}, it's important to evaluate your specific needs."""
+
+        try:
+            response = self.llm.client.messages.create(
+                model=self.llm.model,
+                max_tokens=100,
+                system="You are a content writer. Generate a natural sentence with the exact keyword phrase.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            sentence = response.content[0].text.strip()
+
+            # Validate keyword is present
+            if keyword.lower() not in sentence.lower():
+                return None
+
+            # Ensure proper punctuation
+            if not sentence.endswith((".", "!", "?")):
+                sentence += "."
+
+            return sentence
+
+        except Exception:
+            # Fallback template
+            return f"Understanding {keyword} is essential for making informed decisions."
+
+    def _fix_consecutive_insertions(
+        self,
+        blocks: list[ParagraphBlock],
+    ) -> list[ParagraphBlock]:
+        """
+        Fix any blocks with more than 2 consecutive green (marked) sentences.
+
+        If a block has >2 marked sentences, move excess to adjacent blocks.
+
+        Args:
+            blocks: Content blocks to check.
+
+        Returns:
+            Updated blocks with max 2 consecutive green sentences.
+        """
+        # Count marked sentences per block
+        updated_blocks = list(blocks)
+        max_marked = 2
+
+        for i, block in enumerate(updated_blocks):
+            # Count marked sentences in this block
+            marked_count = block.text.count(ADD_START)
+
+            if marked_count <= max_marked:
+                continue
+
+            # Need to redistribute excess
+            # Split text by markers and reconstruct
+            excess = marked_count - max_marked
+
+            # Find adjacent blocks that can accept overflow
+            # Try next block first, then previous
+            overflow_sentences = []
+
+            # Extract excess marked sentences from end
+            text = block.text
+            for _ in range(excess):
+                last_start = text.rfind(ADD_START)
+                if last_start == -1:
+                    break
+                last_end = text.rfind(ADD_END)
+                if last_end == -1 or last_end < last_start:
+                    break
+
+                # Extract the marked sentence
+                marked_portion = text[last_start:last_end + len(ADD_END)]
+                overflow_sentences.insert(0, marked_portion)
+                text = text[:last_start].rstrip()
+
+            # Update current block
+            updated_blocks[i] = ParagraphBlock(
+                text=text,
+                heading_level=block.heading_level,
+            )
+
+            # Distribute overflow to adjacent blocks
+            for j, overflow in enumerate(overflow_sentences):
+                # Find next suitable block
+                target_idx = i + j + 1
+                if target_idx < len(updated_blocks) and not updated_blocks[target_idx].is_heading:
+                    target_block = updated_blocks[target_idx]
+                    combined = normalize_paragraph_spacing(target_block.text + " " + overflow)
+                    updated_blocks[target_idx] = ParagraphBlock(
+                        text=combined,
+                        heading_level=target_block.heading_level,
+                    )
 
         return updated_blocks
 
