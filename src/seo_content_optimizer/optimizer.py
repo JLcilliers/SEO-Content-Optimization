@@ -364,16 +364,25 @@ class ContentOptimizer:
         self._optimization_plan = optimization_plan
 
         # Step 3: Get current meta elements
+        import sys
         if isinstance(content, PageMeta):
             current_title = content.title
             current_meta_desc = content.meta_description
             current_h1 = content.h1
             blocks = convert_page_meta_to_blocks(content)
+            print(f"DEBUG Step 3 (PageMeta): H1='{current_h1}'", file=sys.stderr)
         else:
             current_title = None
             current_meta_desc = None
             current_h1 = content.h1
             blocks = content.paragraphs
+            print(f"DEBUG Step 3 (DocxContent): H1='{current_h1}'", file=sys.stderr)
+
+        # Debug: Count H1 blocks after conversion
+        h1_blocks = [b for b in blocks if b.heading_level == HeadingLevel.H1]
+        print(f"DEBUG Step 3: {len(blocks)} blocks total, {len(h1_blocks)} H1 blocks", file=sys.stderr)
+        for i, b in enumerate(h1_blocks):
+            print(f"  H1 Block {i}: '{b.text[:80]}...'", file=sys.stderr)
 
         # Step 4: Optimize meta elements using optimization plan
         meta_elements = self._optimize_meta_elements(
@@ -403,11 +412,23 @@ class ContentOptimizer:
                 optimized_h1_text = meta.optimized
                 break
 
+        # Debug: Check H1 blocks before replacement
+        h1_before = [b for b in optimized_blocks if b.heading_level == HeadingLevel.H1]
+        print(f"DEBUG Step 5.5: Before H1 replacement: {len(h1_before)} H1 blocks in optimized_blocks", file=sys.stderr)
+
         if optimized_h1_text:
+            print(f"DEBUG Step 5.5: Calling _replace_h1_in_blocks with optimized_h1='{optimized_h1_text[:80]}...'", file=sys.stderr)
             optimized_blocks = self._replace_h1_in_blocks(
                 blocks=optimized_blocks,
                 optimized_h1=optimized_h1_text,
             )
+            # Debug: Check H1 blocks after replacement
+            h1_after = [b for b in optimized_blocks if b.heading_level == HeadingLevel.H1]
+            print(f"DEBUG Step 5.5: After H1 replacement: {len(h1_after)} H1 blocks", file=sys.stderr)
+            for i, b in enumerate(h1_after):
+                print(f"  H1 Block {i}: '{b.text[:80]}...'", file=sys.stderr)
+        else:
+            print(f"DEBUG Step 5.5: No optimized H1 found in meta_elements!", file=sys.stderr)
 
         # Step 6: Generate FAQ if requested (Part 10 of 10-Part Framework)
         # Uses optimization plan's faq_keywords for targeted keyword integration
@@ -457,9 +478,14 @@ class ContentOptimizer:
         original_body_length = sum(len(block.text) for block in blocks)
         optimized_body_length = sum(len(strip_markers(block.text)) for block in optimized_blocks)
 
+        # Debug: Check H1 before content deletion check
+        h1_before_check = [b for b in optimized_blocks if b.heading_level == HeadingLevel.H1]
+        print(f"DEBUG Step 7.9: H1 blocks before content check: {len(h1_before_check)}", file=sys.stderr)
+        for i, b in enumerate(h1_before_check):
+            print(f"  H1 Block {i}: '{b.text[:80]}...'", file=sys.stderr)
+
         if optimized_body_length < original_body_length * 0.85:
             # CRITICAL: Content was deleted - fall back to original blocks
-            import sys
             deletion_pct = (1 - optimized_body_length / original_body_length) * 100 if original_body_length > 0 else 0
             print(
                 f"CRITICAL: Content deletion detected - "
@@ -471,6 +497,15 @@ class ContentOptimizer:
             # Fall back to original blocks but keep meta elements
             # Add minimal keyword markers to original to preserve functionality
             optimized_blocks = blocks
+            print(f"DEBUG Step 7.9: Fell back to original blocks!", file=sys.stderr)
+        else:
+            print(f"DEBUG Step 7.9: Content check passed, keeping optimized blocks", file=sys.stderr)
+
+        # Debug: Final H1 check before return
+        h1_final = [b for b in optimized_blocks if b.heading_level == HeadingLevel.H1]
+        print(f"DEBUG FINAL: {len(h1_final)} H1 blocks in final optimized_blocks", file=sys.stderr)
+        for i, b in enumerate(h1_final):
+            print(f"  FINAL H1 Block {i}: '{b.text[:100]}...'", file=sys.stderr)
 
         # Step 8: Compute SCOPED keyword usage counts in final output
         # This provides transparency on where keywords appear (body vs meta vs FAQ)
@@ -1123,12 +1158,20 @@ Return ONLY the optimized heading text, with no markers or annotations."""
         Returns:
             Updated blocks with H1 replaced.
         """
+        import sys
+
         result = []
         h1_replaced = False
 
-        for block in blocks:
+        # Debug: Count H1 blocks in input
+        h1_count = sum(1 for b in blocks if b.heading_level == HeadingLevel.H1)
+        print(f"DEBUG _replace_h1_in_blocks: {len(blocks)} blocks, {h1_count} H1 blocks", file=sys.stderr)
+        print(f"DEBUG _replace_h1_in_blocks: optimized_h1='{optimized_h1[:100]}...'", file=sys.stderr)
+
+        for i, block in enumerate(blocks):
             if block.heading_level == HeadingLevel.H1 and not h1_replaced:
                 # Replace with optimized H1
+                print(f"DEBUG: Replacing H1 at index {i}: '{block.text[:50]}...' -> '{optimized_h1[:50]}...'", file=sys.stderr)
                 result.append(
                     ParagraphBlock(
                         text=optimized_h1,
@@ -1139,6 +1182,11 @@ Return ONLY the optimized heading text, with no markers or annotations."""
                 h1_replaced = True
             else:
                 result.append(block)
+
+        if not h1_replaced:
+            print(f"WARNING: No H1 block found to replace! First 3 block types:", file=sys.stderr)
+            for i, b in enumerate(blocks[:3]):
+                print(f"  Block {i}: heading_level={b.heading_level}, text='{b.text[:50]}...'", file=sys.stderr)
 
         return result
 
