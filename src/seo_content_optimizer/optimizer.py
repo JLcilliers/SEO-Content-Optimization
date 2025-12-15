@@ -506,6 +506,16 @@ class ContentOptimizer:
                     blocks=optimized_blocks,
                     optimized_h1=optimized_h1_text,
                 )
+
+            # Re-apply keyword enforcement after fallback - original blocks don't have keywords
+            print(f"DEBUG Step 7.9: Re-applying keyword enforcement after fallback", file=sys.stderr)
+            optimized_blocks = self._enforce_body_keyword_invariants(
+                blocks=optimized_blocks,
+                keyword_plan=keyword_plan,
+                topic=analysis.topic,
+                primary_target=target_count,
+                secondary_target=3,
+            )
         else:
             print(f"DEBUG Step 7.9: Content check passed, keeping optimized blocks", file=sys.stderr)
 
