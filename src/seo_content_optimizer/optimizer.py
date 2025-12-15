@@ -498,6 +498,14 @@ class ContentOptimizer:
             # Add minimal keyword markers to original to preserve functionality
             optimized_blocks = blocks
             print(f"DEBUG Step 7.9: Fell back to original blocks!", file=sys.stderr)
+
+            # Re-apply H1 replacement even on fallback - keep optimized H1 from meta table
+            if optimized_h1_text:
+                print(f"DEBUG Step 7.9: Re-applying H1 replacement after fallback", file=sys.stderr)
+                optimized_blocks = self._replace_h1_in_blocks(
+                    blocks=optimized_blocks,
+                    optimized_h1=optimized_h1_text,
+                )
         else:
             print(f"DEBUG Step 7.9: Content check passed, keeping optimized blocks", file=sys.stderr)
 

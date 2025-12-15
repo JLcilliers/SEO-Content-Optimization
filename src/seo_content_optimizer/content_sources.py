@@ -310,18 +310,29 @@ def convert_page_meta_to_blocks(page_meta: PageMeta) -> list[ParagraphBlock]:
     blocks: list[ParagraphBlock] = []
 
     # Add H1 if present
-    if page_meta.h1:
-        blocks.append(ParagraphBlock(text=page_meta.h1, heading_level=HeadingLevel.H1))
+    h1_text = page_meta.h1.strip() if page_meta.h1 else ""
+    if h1_text:
+        blocks.append(ParagraphBlock(text=h1_text, heading_level=HeadingLevel.H1))
 
     # Add content blocks as body paragraphs
     # In real scenarios, we might want to detect headings within content_blocks
     for block in page_meta.content_blocks:
+        block_text = block.strip()
+
+        # Skip empty blocks
+        if not block_text:
+            continue
+
+        # Skip blocks that match the H1 text (avoid duplication from FireCrawl)
+        if h1_text and block_text == h1_text:
+            continue
+
         # Simple heuristic: short text that looks like a heading
-        if len(block) < 100 and not block.endswith((".", "!", "?")):
+        if len(block_text) < 100 and not block_text.endswith((".", "!", "?")):
             # Might be a heading - default to H2
-            blocks.append(ParagraphBlock(text=block, heading_level=HeadingLevel.H2))
+            blocks.append(ParagraphBlock(text=block_text, heading_level=HeadingLevel.H2))
         else:
-            blocks.append(ParagraphBlock(text=block, heading_level=HeadingLevel.BODY))
+            blocks.append(ParagraphBlock(text=block_text, heading_level=HeadingLevel.BODY))
 
     return blocks
 
@@ -608,13 +619,18 @@ def _page_meta_to_document(page_meta: PageMeta, url: str) -> ContentDocument:
         blocks.append(Block.create(block_type="meta_desc", text=page_meta.meta_description))
 
     # Add H1 block
-    if page_meta.h1:
-        blocks.append(Block.create(block_type="h1", text=page_meta.h1))
+    h1_text = page_meta.h1.strip() if page_meta.h1 else ""
+    if h1_text:
+        blocks.append(Block.create(block_type="h1", text=h1_text))
 
     # Convert content blocks to typed blocks with heuristic detection
     for content in page_meta.content_blocks:
         content = content.strip()
         if not content:
+            continue
+
+        # Skip blocks that match the H1 text (avoid duplication from FireCrawl)
+        if h1_text and content == h1_text:
             continue
 
         # Detect block type from content characteristics
