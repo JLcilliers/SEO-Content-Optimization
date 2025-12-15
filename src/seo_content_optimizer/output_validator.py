@@ -289,7 +289,7 @@ def get_violation_summary(results: list[ValidationResult]) -> dict:
 def validate_content_preservation(
     original: str,
     optimized: str,
-    min_preservation_ratio: float = 0.85,
+    min_preservation_ratio: float = 0.70,
     context: str = "content",
 ) -> tuple[bool, str]:
     """

@@ -965,25 +965,15 @@ class ContentOptimizer:
                 )
             else:
                 # Body paragraphs - Tier 5 placement
-                # Check if already contains keywords
-                text_lower = block.text.lower()
-                has_primary = primary.lower() in text_lower
-                has_secondary = any(kw.lower() in text_lower for kw in secondary)
-
-                # Find keywords that still need placement
-                unplaced_keywords = [
-                    kw for kw in body_keywords
-                    if kw.lower() not in keywords_placed_in_body
-                ][:2]
-
-                if (not has_primary and not has_secondary and len(block.text) > 100) or unplaced_keywords:
-                    # Optimize to add keywords
-                    keywords_to_add = unplaced_keywords if unplaced_keywords else secondary[:2]
+                # Always send non-heading body paragraphs to LLM for potential optimization
+                # (unless already handled by first few paragraphs or conclusion logic)
+                # Ensure the paragraph has substantial text before sending to LLM
+                if len(block.text) > 50:  # Only optimize paragraphs with more than 50 characters
                     rewritten_text = self.llm.rewrite_with_markers(
                         content=block.text,
-                        primary_keyword=primary if primary.lower() not in keywords_placed_in_body else keywords_to_add[0] if keywords_to_add else primary,
-                        secondary_keywords=keywords_to_add,
-                        context="Optimize this paragraph to naturally include relevant keywords.",
+                        primary_keyword=primary if primary.lower() not in keywords_placed_in_body else primary, # Provide primary for context
+                        secondary_keywords=secondary, # Provide all secondary for context
+                        context="Optimize this paragraph to naturally include relevant keywords and enhance content quality.",
                         content_topics=content_topics,
                         brand_context=getattr(self, '_brand_context', None),
                     )
@@ -1010,7 +1000,7 @@ class ContentOptimizer:
                         )
                     )
                 else:
-                    # Keep as-is but track any keywords present
+                    # Keep very short paragraphs as-is but track any keywords present
                     for kw in [primary] + secondary:
                         if kw.lower() in text_lower:
                             keywords_placed_in_body.add(kw.lower())
