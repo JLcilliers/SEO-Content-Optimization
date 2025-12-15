@@ -161,13 +161,22 @@ class TestGenerateOutputFilename:
 class TestSuggestFilenameForDownload:
     """Tests for the download filename suggestion function."""
 
+    def test_h1_heading_takes_priority(self):
+        """Test that H1 heading is used when provided."""
+        result = suggest_filename_for_download(
+            "https://example.com/upload",
+            original_filename="my-report.docx",
+            h1_heading="Best SEO Tips for 2025",
+        )
+        assert result == "best-seo-tips-for-2025-optimized-content.docx"
+
     def test_uses_original_filename(self):
-        """Test that original filename is used when provided."""
+        """Test that original filename is used when H1 not provided."""
         result = suggest_filename_for_download(
             "https://example.com/upload",
             original_filename="my-report.docx"
         )
-        assert result == "optimized-my-report.docx"
+        assert result == "my-report-optimized-content.docx"
 
     def test_handles_optimized_original(self):
         """Test handling when original already has 'optimized' prefix."""
@@ -175,14 +184,31 @@ class TestSuggestFilenameForDownload:
             "https://example.com/upload",
             original_filename="optimized-report.docx"
         )
-        assert result == "optimized-report.docx"
+        assert result == "report-optimized-content.docx"
 
     def test_generates_from_url_without_original(self):
         """Test URL-based generation when no original filename."""
         result = suggest_filename_for_download("https://example.com/about-page")
-        assert result == "optimized-about-page.docx"
+        assert result == "about-page-optimized-content.docx"
 
     def test_fallback_filename(self):
         """Test fallback when nothing else works."""
         result = suggest_filename_for_download("not-a-url")
         assert result == "optimized-content.docx"
+
+    def test_h1_empty_falls_back_to_original_filename(self):
+        """Test that empty H1 falls back to original filename."""
+        result = suggest_filename_for_download(
+            "https://example.com/upload",
+            original_filename="my-doc.docx",
+            h1_heading="",
+        )
+        assert result == "my-doc-optimized-content.docx"
+
+    def test_h1_with_special_characters(self):
+        """Test that H1 with special characters is properly slugified."""
+        result = suggest_filename_for_download(
+            "https://example.com/upload",
+            h1_heading="How to: Use SEO & Improve Rankings!",
+        )
+        assert result == "how-to-use-seo-improve-rankings-optimized-content.docx"

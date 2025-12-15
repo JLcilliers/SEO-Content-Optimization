@@ -203,8 +203,18 @@ async def optimize_from_url(request: OptimizeURLRequest):
             max_secondary=request.max_secondary,
         )
 
-        # Generate suggested filename from URL
-        suggested_filename = suggest_filename_for_download(request.source_url)
+        # Extract H1 from meta elements for filename generation
+        h1_heading = None
+        for me in result.meta_elements:
+            if me.element_name == "H1":
+                h1_heading = me.optimized or me.current
+                break
+
+        # Generate suggested filename from URL (prioritizes H1 if available)
+        suggested_filename = suggest_filename_for_download(
+            source=request.source_url,
+            h1_heading=h1_heading,
+        )
 
         # Generate DOCX with source URL and document title
         writer = DocxWriter()
@@ -304,10 +314,18 @@ async def optimize_from_file(
             max_secondary=max_secondary,
         )
 
-        # Generate better filename for download
+        # Extract H1 from meta elements for filename generation
+        h1_heading = None
+        for me in result.meta_elements:
+            if me.element_name == "H1":
+                h1_heading = me.optimized or me.current
+                break
+
+        # Generate better filename for download (prioritizes H1 if available)
         download_filename = suggest_filename_for_download(
             source="file-upload",
             original_filename=file.filename,
+            h1_heading=h1_heading,
         )
 
         # Create document title from original filename
@@ -396,8 +414,18 @@ async def optimize_url_with_keywords_file(
             max_secondary=max_secondary,
         )
 
-        # Generate suggested filename from URL
-        suggested_filename = suggest_filename_for_download(source_url)
+        # Extract H1 from meta elements for filename generation
+        h1_heading = None
+        for me in result.meta_elements:
+            if me.element_name == "H1":
+                h1_heading = me.optimized or me.current
+                break
+
+        # Generate suggested filename from URL (prioritizes H1 if available)
+        suggested_filename = suggest_filename_for_download(
+            source=source_url,
+            h1_heading=h1_heading,
+        )
 
         # Create document title from filename (without extension and suffix)
         document_title = suggested_filename.replace(".docx", "").replace("-optimized-content", "")

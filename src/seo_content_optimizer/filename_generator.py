@@ -172,31 +172,45 @@ def _slugify(text: str) -> str:
 def suggest_filename_for_download(
     source: Union[str, Path],
     original_filename: Optional[str] = None,
+    h1_heading: Optional[str] = None,
 ) -> str:
     """
     Generate a suggested filename for HTTP Content-Disposition header.
 
+    Priority order:
+    1. H1 heading (if provided) - most descriptive of content
+    2. Original filename (for file uploads)
+    3. URL-derived name (for URL sources)
+    4. Generic fallback
+
     Args:
         source: URL or file path that was the source.
         original_filename: Original filename if from file upload.
+        h1_heading: The H1 heading of the document (preferred source).
 
     Returns:
         Suggested filename string with .docx extension.
     """
+    # Priority 1: Use H1 heading if provided
+    if h1_heading and h1_heading.strip():
+        slug = _slugify(h1_heading.strip())
+        if slug and slug != "content":
+            return f"{slug}-optimized-content.docx"
+
     source_str = str(source)
 
-    # If we have an original filename (file upload case), use it
+    # Priority 2: If we have an original filename (file upload case), use it
     if original_filename:
         stem = Path(original_filename).stem
         # Remove existing 'optimized' prefix if present
         stem = re.sub(r"^optimized[-_]?", "", stem, flags=re.IGNORECASE)
         if stem:
-            return f"optimized-{_slugify(stem)}.docx"
+            return f"{_slugify(stem)}-optimized-content.docx"
 
-    # For URLs, generate from the URL
+    # Priority 3: For URLs, generate from the URL
     if source_str.startswith(("http://", "https://")):
         base = _generate_from_url(source_str)
-        return f"optimized-{base}.docx"
+        return f"{base}-optimized-content.docx"
 
     # Fallback
     return "optimized-content.docx"
