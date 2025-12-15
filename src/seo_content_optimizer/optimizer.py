@@ -17,6 +17,7 @@ BRAND NAME PROTECTION:
 """
 
 import re
+from dataclasses import dataclass, field
 from typing import Optional, Union
 
 from .analysis import (
@@ -74,6 +75,59 @@ from .models import (
     ParagraphBlock,
 )
 from .prioritizer import create_keyword_plan
+
+
+@dataclass
+class KeywordCounts:
+    """
+    Scoped keyword counts across different document sections.
+
+    This dataclass separates keyword occurrences by location to ensure
+    body content is the primary target for keyword satisfaction, not
+    meta elements or FAQ sections.
+    """
+    meta: int = 0       # Count in title + description + H1
+    headings: int = 0   # Count in H2+ headings (excluding H1)
+    body: int = 0       # Count in body paragraphs (non-heading blocks)
+    faq: int = 0        # Count in FAQ questions + answers
+
+    @property
+    def total(self) -> int:
+        """Total count across all sections."""
+        return self.meta + self.headings + self.body + self.faq
+
+    @property
+    def body_and_headings(self) -> int:
+        """Count in body content (paragraphs + headings, excluding meta/FAQ)."""
+        return self.body + self.headings
+
+
+@dataclass
+class ScopedKeywordCounts:
+    """
+    Complete keyword counts report with scoped breakdowns.
+
+    Used for transparent reporting of where keywords appear.
+    """
+    keyword: str
+    target: int
+    counts: KeywordCounts
+    is_primary: bool = False
+
+    @property
+    def body_satisfied(self) -> bool:
+        """Check if target is satisfied by body content alone."""
+        return self.counts.body >= self.target
+
+    @property
+    def total_satisfied(self) -> bool:
+        """Check if target is satisfied by total (legacy behavior)."""
+        return self.counts.total >= self.target
+
+    @property
+    def body_needed(self) -> int:
+        """How many more occurrences needed in body to satisfy target."""
+        return max(0, self.target - self.counts.body)
 
 
 def ensure_keyword_in_text(text: str, keyword: str, position: str = "start") -> str:
@@ -387,6 +441,17 @@ class ContentOptimizer:
             secondary_target=3,  # Each secondary keyword should appear at least 3 times
         )
 
+        # Step 7.7: ENFORCE BODY KEYWORD INVARIANTS before FAQ generation
+        # This is the FINAL SAFETY check to ensure body targets are satisfied.
+        # If any keyword is below target in body text, inject deterministically.
+        optimized_blocks = self._enforce_body_keyword_invariants(
+            blocks=optimized_blocks,
+            keyword_plan=keyword_plan,
+            topic=analysis.topic,
+            primary_target=target_count,
+            secondary_target=3,
+        )
+
         # Step 7.9: FINAL SAFETY CHECK - Validate content preservation
         # Ensure total optimized content >= original content (additive only)
         original_body_length = sum(len(block.text) for block in blocks)
@@ -407,13 +472,22 @@ class ContentOptimizer:
             # Add minimal keyword markers to original to preserve functionality
             optimized_blocks = blocks
 
-        # Step 8: Compute keyword usage counts in final output
-        keyword_usage_counts = self._compute_keyword_usage_counts(
+        # Step 8: Compute SCOPED keyword usage counts in final output
+        # This provides transparency on where keywords appear (body vs meta vs FAQ)
+        scoped_keyword_counts = self._compute_keyword_usage_counts(
             meta_elements=meta_elements,
             optimized_blocks=optimized_blocks,
             faq_items=faq_items,
             keyword_plan=keyword_plan,
+            primary_target=target_count,
+            secondary_target=3,
         )
+
+        # Log scoped counts for transparency
+        self._log_scoped_keyword_counts(scoped_keyword_counts)
+
+        # Convert to legacy format for backward compatibility
+        keyword_usage_counts = self._get_legacy_keyword_counts(scoped_keyword_counts)
 
         return OptimizationResult(
             meta_elements=meta_elements,
@@ -1413,6 +1487,155 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
 
         return updated_blocks
 
+    def _enforce_body_keyword_invariants(
+        self,
+        blocks: list[ParagraphBlock],
+        keyword_plan: KeywordPlan,
+        topic: str,
+        primary_target: int = 6,
+        secondary_target: int = 3,
+    ) -> list[ParagraphBlock]:
+        """
+        FINAL SAFETY: Enforce body keyword invariants before FAQ generation.
+
+        After all optimization and distribution, this method guarantees:
+        1. Primary keyword appears >= primary_target times in body (non-heading blocks)
+        2. Each secondary keyword appears >= secondary_target times in body
+
+        If any target is NOT satisfied, performs deterministic injection directly
+        into body paragraphs as a last resort.
+
+        Args:
+            blocks: Content blocks after optimization.
+            keyword_plan: All keywords (primary + secondary).
+            topic: Content topic for generating sentences.
+            primary_target: Target count for primary keyword in body.
+            secondary_target: Target count for each secondary keyword in body.
+
+        Returns:
+            Updated blocks with guaranteed keyword invariants.
+        """
+        import sys
+
+        # Step 1: Count keywords in BODY ONLY (non-heading blocks)
+        body_text = " ".join(
+            strip_markers(block.text)
+            for block in blocks
+            if not block.is_heading
+        ).lower()
+
+        # Step 2: Check each keyword against its target
+        unsatisfied_keywords = []
+
+        # Check primary keyword
+        primary = keyword_plan.primary.phrase
+        primary_count = count_keyword_in_text(body_text, primary)
+        if primary_count < primary_target:
+            needed = primary_target - primary_count
+            unsatisfied_keywords.append({
+                "keyword": primary,
+                "needed": needed,
+                "is_primary": True,
+                "current": primary_count,
+                "target": primary_target,
+            })
+            print(
+                f"BODY INVARIANT VIOLATION: Primary keyword '{primary}' has only "
+                f"{primary_count}/{primary_target} occurrences in body. Need {needed} more.",
+                file=sys.stderr
+            )
+
+        # Check secondary keywords
+        for secondary in keyword_plan.secondary:
+            phrase = secondary.phrase
+            count = count_keyword_in_text(body_text, phrase)
+            if count < secondary_target:
+                needed = secondary_target - count
+                unsatisfied_keywords.append({
+                    "keyword": phrase,
+                    "needed": needed,
+                    "is_primary": False,
+                    "current": count,
+                    "target": secondary_target,
+                })
+                print(
+                    f"BODY INVARIANT VIOLATION: Secondary keyword '{phrase}' has only "
+                    f"{count}/{secondary_target} occurrences in body. Need {needed} more.",
+                    file=sys.stderr
+                )
+
+        # Step 3: If all targets satisfied, return unchanged
+        if not unsatisfied_keywords:
+            print("BODY INVARIANTS SATISFIED: All keywords meet body targets.", file=sys.stderr)
+            return blocks
+
+        # Step 4: Deterministic injection for unsatisfied keywords
+        print(
+            f"ENFORCING BODY INVARIANTS: Injecting {len(unsatisfied_keywords)} "
+            f"unsatisfied keywords into body paragraphs...",
+            file=sys.stderr
+        )
+
+        updated_blocks = list(blocks)
+
+        # Get all body paragraph indices (sorted from start to end)
+        paragraph_indices = self._get_all_paragraph_indices(updated_blocks)
+
+        if not paragraph_indices:
+            print("WARNING: No body paragraphs available for injection.", file=sys.stderr)
+            return blocks
+
+        # Build flat list of all keyword insertions needed
+        all_insertions = []
+        for kw_info in unsatisfied_keywords:
+            for _ in range(kw_info["needed"]):
+                all_insertions.append(kw_info["keyword"])
+
+        # Distribute insertions evenly across paragraphs
+        insertion_assignments = self._calculate_paragraph_interval_insertions(
+            paragraph_indices=paragraph_indices,
+            insertions=all_insertions,
+        )
+
+        # Insert keywords at their assigned paragraphs
+        updated_blocks = self._insert_keywords_at_paragraphs(
+            blocks=updated_blocks,
+            insertion_assignments=insertion_assignments,
+            topic=topic,
+        )
+
+        # Fix any clustering issues
+        updated_blocks = self._fix_consecutive_insertions(updated_blocks)
+
+        # Step 5: Verify invariants are now satisfied
+        body_text_after = " ".join(
+            strip_markers(block.text)
+            for block in updated_blocks
+            if not block.is_heading
+        ).lower()
+
+        still_unsatisfied = []
+        for kw_info in unsatisfied_keywords:
+            keyword = kw_info["keyword"]
+            target = kw_info["target"]
+            new_count = count_keyword_in_text(body_text_after, keyword)
+            if new_count < target:
+                still_unsatisfied.append(f"{keyword} ({new_count}/{target})")
+            else:
+                print(
+                    f"  ✓ '{keyword}' now has {new_count}/{target} in body",
+                    file=sys.stderr
+                )
+
+        if still_unsatisfied:
+            print(
+                f"WARNING: Some keywords still below target after enforcement: "
+                f"{', '.join(still_unsatisfied)}",
+                file=sys.stderr
+            )
+
+        return updated_blocks
+
     def _get_all_paragraph_indices(
         self,
         blocks: list[ParagraphBlock],
@@ -1690,43 +1913,50 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
         secondary_target: int,
     ) -> list[dict]:
         """
-        Calculate how many more occurrences each keyword needs.
+        Calculate how many more occurrences each keyword needs IN BODY CONTENT.
+
+        IMPORTANT: Keyword satisfaction is based on BODY CONTENT ONLY.
+        Meta elements (title, description, H1) and FAQ do NOT count toward targets.
+        This ensures keywords are actually placed in the main content.
 
         Args:
-            meta_elements: Meta elements to count.
-            blocks: Content blocks to count.
+            meta_elements: Meta elements (NOT counted toward targets, kept for reference).
+            blocks: Content blocks to count (body paragraphs only, not headings).
             keyword_plan: All keywords.
-            primary_target: Target for primary keyword.
-            secondary_target: Target for each secondary keyword.
+            primary_target: Target for primary keyword in body.
+            secondary_target: Target for each secondary keyword in body.
 
         Returns:
             List of {keyword, needed, is_primary} dicts for keywords below target.
         """
-        # Build full text for counting
-        meta_text = " ".join(elem.optimized or '' for elem in meta_elements)
-        body_text = " ".join(strip_markers(block.text) for block in blocks)
-        full_text = f"{meta_text} {body_text}".lower()
+        # Build BODY-ONLY text for counting (non-heading blocks only)
+        # Meta and FAQ are intentionally excluded from satisfaction counting
+        body_text = " ".join(
+            strip_markers(block.text)
+            for block in blocks
+            if not block.is_heading
+        ).lower()
 
         keyword_needs = []
 
-        # Check primary keyword
+        # Check primary keyword (body count only)
         primary = keyword_plan.primary.phrase
-        current_count = count_keyword_in_text(full_text, primary)
-        if current_count < primary_target:
+        body_count = count_keyword_in_text(body_text, primary)
+        if body_count < primary_target:
             keyword_needs.append({
                 "keyword": primary,
-                "needed": primary_target - current_count,
+                "needed": primary_target - body_count,
                 "is_primary": True,
             })
 
-        # Check secondary keywords
+        # Check secondary keywords (body count only)
         for secondary in keyword_plan.secondary:
             phrase = secondary.phrase
-            current_count = count_keyword_in_text(full_text, phrase)
-            if current_count < secondary_target:
+            body_count = count_keyword_in_text(body_text, phrase)
+            if body_count < secondary_target:
                 keyword_needs.append({
                     "keyword": phrase,
-                    "needed": secondary_target - current_count,
+                    "needed": secondary_target - body_count,
                     "is_primary": False,
                 })
 
@@ -2388,55 +2618,152 @@ Professional {keyword} solutions provide reliable security for businesses of all
         optimized_blocks: list[ParagraphBlock],
         faq_items: list[FAQItem],
         keyword_plan: KeywordPlan,
-    ) -> dict[str, int]:
+        primary_target: int = 8,
+        secondary_target: int = 3,
+    ) -> dict[str, ScopedKeywordCounts]:
         """
-        Compute keyword usage counts across all final optimized content.
+        Compute SCOPED keyword usage counts across all final optimized content.
 
-        Counts each keyword occurrence in:
-        - Meta elements (title, description, H1)
-        - Body content blocks
-        - FAQ items
+        TRANSPARENCY: Returns detailed breakdown of where keywords appear:
+        - Meta (title, description, H1) - for SEO but NOT counted toward targets
+        - Headings (H2+) - subheadings
+        - Body (non-heading paragraphs) - PRIMARY target for keyword satisfaction
+        - FAQ (questions + answers) - for featured snippets, NOT counted toward targets
+
+        This allows transparent reporting and ensures body content is the
+        primary target for keyword placement, not meta/FAQ.
 
         Args:
             meta_elements: The optimized meta elements.
             optimized_blocks: The optimized content blocks.
             faq_items: The generated FAQ items.
             keyword_plan: The keyword plan with primary and secondary keywords.
+            primary_target: Target count for primary keyword.
+            secondary_target: Target count for secondary keywords.
 
         Returns:
-            Dictionary mapping keyword phrase to occurrence count.
+            Dictionary mapping keyword phrase to ScopedKeywordCounts with full breakdown.
         """
-        # Build full text from all optimized content (strip markers for counting)
-        text_parts = []
+        # Build SCOPED text for counting (strip markers for accurate counting)
 
-        # Add meta elements
-        for meta in meta_elements:
-            text_parts.append(strip_markers(meta.optimized))
+        # Meta text (title + description + H1)
+        meta_text = " ".join(
+            strip_markers(meta.optimized) for meta in meta_elements
+        ).lower()
 
-        # Add body content
-        for block in optimized_blocks:
-            text_parts.append(strip_markers(block.text))
+        # Headings text (H2+ only, excluding H1 which is in meta)
+        headings_text = " ".join(
+            strip_markers(block.text)
+            for block in optimized_blocks
+            if block.is_heading and block.heading_level > 1
+        ).lower()
 
-        # Add FAQ content
-        for faq in faq_items:
-            text_parts.append(strip_markers(faq.question))
-            text_parts.append(strip_markers(faq.answer))
+        # Body text (non-heading blocks only)
+        body_text = " ".join(
+            strip_markers(block.text)
+            for block in optimized_blocks
+            if not block.is_heading
+        ).lower()
 
-        full_text = " ".join(text_parts)
+        # FAQ text (questions + answers)
+        faq_text = " ".join(
+            strip_markers(faq.question) + " " + strip_markers(faq.answer)
+            for faq in faq_items
+        ).lower() if faq_items else ""
 
-        # Count each keyword
-        counts = {}
+        # Count each keyword in each scope
+        scoped_counts: dict[str, ScopedKeywordCounts] = {}
 
         # Count primary keyword
-        counts[keyword_plan.primary.phrase] = count_keyword_in_text(
-            full_text, keyword_plan.primary.phrase
+        primary = keyword_plan.primary.phrase
+        scoped_counts[primary] = ScopedKeywordCounts(
+            keyword=primary,
+            target=primary_target,
+            counts=KeywordCounts(
+                meta=count_keyword_in_text(meta_text, primary),
+                headings=count_keyword_in_text(headings_text, primary),
+                body=count_keyword_in_text(body_text, primary),
+                faq=count_keyword_in_text(faq_text, primary),
+            ),
+            is_primary=True,
         )
 
         # Count secondary keywords
         for kw in keyword_plan.secondary:
-            counts[kw.phrase] = count_keyword_in_text(full_text, kw.phrase)
+            phrase = kw.phrase
+            scoped_counts[phrase] = ScopedKeywordCounts(
+                keyword=phrase,
+                target=secondary_target,
+                counts=KeywordCounts(
+                    meta=count_keyword_in_text(meta_text, phrase),
+                    headings=count_keyword_in_text(headings_text, phrase),
+                    body=count_keyword_in_text(body_text, phrase),
+                    faq=count_keyword_in_text(faq_text, phrase),
+                ),
+                is_primary=False,
+            )
 
-        return counts
+        return scoped_counts
+
+    def _get_legacy_keyword_counts(
+        self,
+        scoped_counts: dict[str, ScopedKeywordCounts],
+    ) -> dict[str, int]:
+        """
+        Convert scoped counts to legacy format (total counts only).
+
+        Used for backward compatibility with existing code that expects
+        dict[str, int] format.
+
+        Args:
+            scoped_counts: Scoped keyword counts from _compute_keyword_usage_counts.
+
+        Returns:
+            Dictionary mapping keyword phrase to total occurrence count.
+        """
+        return {kw: counts.counts.total for kw, counts in scoped_counts.items()}
+
+    def _log_scoped_keyword_counts(
+        self,
+        scoped_counts: dict[str, ScopedKeywordCounts],
+    ) -> None:
+        """
+        Log detailed scoped keyword counts for transparency.
+
+        This provides visibility into where keywords appear:
+        - Body count (primary target for satisfaction)
+        - Meta count (title/description/H1)
+        - Headings count (H2+)
+        - FAQ count (questions/answers)
+        - Total count
+
+        Args:
+            scoped_counts: Scoped keyword counts from _compute_keyword_usage_counts.
+        """
+        import sys
+
+        print("\n" + "=" * 60, file=sys.stderr)
+        print("KEYWORD PLACEMENT REPORT (Scoped Counts)", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        print("IMPORTANT: Body count is the PRIMARY target for satisfaction.", file=sys.stderr)
+        print("Meta and FAQ do NOT count toward keyword targets.", file=sys.stderr)
+        print("-" * 60, file=sys.stderr)
+
+        for kw, counts in scoped_counts.items():
+            kw_type = "PRIMARY" if counts.is_primary else "SECONDARY"
+            satisfied = "✓ SATISFIED" if counts.body_satisfied else "✗ NOT SATISFIED"
+
+            print(f"\n[{kw_type}] '{kw}' (target: {counts.target})", file=sys.stderr)
+            print(f"  Body:     {counts.counts.body:3d} / {counts.target} {satisfied}", file=sys.stderr)
+            print(f"  Meta:     {counts.counts.meta:3d} (title/desc/H1 - not counted toward target)", file=sys.stderr)
+            print(f"  Headings: {counts.counts.headings:3d} (H2+ subheadings)", file=sys.stderr)
+            print(f"  FAQ:      {counts.counts.faq:3d} (not counted toward target)", file=sys.stderr)
+            print(f"  Total:    {counts.counts.total:3d}", file=sys.stderr)
+
+            if not counts.body_satisfied:
+                print(f"  ⚠ Need {counts.body_needed} more in BODY to satisfy target", file=sys.stderr)
+
+        print("\n" + "=" * 60, file=sys.stderr)
 
     def _detect_brand_name(
         self,
