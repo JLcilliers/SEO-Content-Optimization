@@ -11,6 +11,7 @@ the visual structure of web pages including headings, tables, and lists.
 
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 from urllib.parse import urlparse
@@ -31,6 +32,11 @@ from .models import (
     HeadingLevel,
     PageMeta,
     ParagraphBlock,
+    # V2 Architecture imports
+    Block,
+    Run,
+    ContentDocument,
+    BlockType,
 )
 
 
@@ -318,3 +324,551 @@ def convert_page_meta_to_blocks(page_meta: PageMeta) -> list[ParagraphBlock]:
             blocks.append(ParagraphBlock(text=block, heading_level=HeadingLevel.BODY))
 
     return blocks
+
+
+# =============================================================================
+# V2 ARCHITECTURE: ContentDocument Extraction
+# =============================================================================
+# These functions produce ContentDocument with typed blocks, preserving
+# structure for tables, lists, headings, and paragraphs.
+# =============================================================================
+
+
+def _html_tag_to_block_type(tag_name: str) -> BlockType:
+    """Map HTML tag name to BlockType."""
+    tag_map: dict[str, BlockType] = {
+        "h1": "h1",
+        "h2": "h2",
+        "h3": "h3",
+        "h4": "h4",
+        "h5": "h5",
+        "h6": "h6",
+        "p": "p",
+        "ul": "ul",
+        "ol": "ol",
+        "li": "li",
+        "table": "table",
+        "tr": "tr",
+        "td": "td",
+        "th": "th",
+        "caption": "caption",
+        "blockquote": "blockquote",
+        "img": "image",
+        "hr": "hr",
+    }
+    return tag_map.get(tag_name.lower(), "p")
+
+
+def _parse_html_to_blocks(soup: BeautifulSoup, source_element=None) -> list[Block]:
+    """
+    Parse HTML content into typed Block objects.
+
+    Preserves structure for headings, paragraphs, lists, and tables.
+
+    Args:
+        soup: BeautifulSoup parsed HTML.
+        source_element: Optional element to extract from (defaults to main content).
+
+    Returns:
+        List of Block objects representing the document structure.
+    """
+    blocks: list[Block] = []
+
+    # Remove unwanted elements
+    for tag in soup.find_all(["script", "style", "nav", "footer", "aside", "noscript"]):
+        tag.decompose()
+
+    # Find main content container
+    if source_element is None:
+        source_element = (
+            soup.find("main")
+            or soup.find("article")
+            or soup.find("div", class_=re.compile(r"content|post|entry|article|body", re.I))
+            or soup.find("div", id=re.compile(r"content|post|entry|article|main", re.I))
+            or soup.body
+            or soup
+        )
+
+    # Process elements in order
+    block_tags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "table", "blockquote", "hr"]
+
+    for element in source_element.find_all(block_tags, recursive=True):
+        # Skip elements that are nested inside other tracked elements (handled by parent)
+        parent = element.parent
+        skip = False
+        while parent and parent != source_element:
+            if parent.name in ["ul", "ol", "table", "blockquote"]:
+                skip = True
+                break
+            parent = parent.parent
+        if skip:
+            continue
+
+        block = _element_to_block(element)
+        if block:
+            blocks.append(block)
+
+    return blocks
+
+
+def _element_to_block(element) -> Optional[Block]:
+    """
+    Convert a BeautifulSoup element to a Block.
+
+    Args:
+        element: BeautifulSoup element.
+
+    Returns:
+        Block object or None if element should be skipped.
+    """
+    tag_name = element.name.lower()
+
+    # Handle headings and paragraphs
+    if tag_name in ("h1", "h2", "h3", "h4", "h5", "h6", "p"):
+        text = element.get_text(strip=True)
+        if not text or len(text) < 3:
+            return None
+        block_type = _html_tag_to_block_type(tag_name)
+        return Block.create(block_type=block_type, text=text)
+
+    # Handle unordered/ordered lists
+    if tag_name in ("ul", "ol"):
+        children: list[Block] = []
+        for li in element.find_all("li", recursive=False):
+            li_text = li.get_text(strip=True)
+            if li_text:
+                li_block = Block.create(block_type="li", text=li_text)
+                children.append(li_block)
+
+        if not children:
+            return None
+
+        block_type: BlockType = "ul" if tag_name == "ul" else "ol"
+        return Block.create(
+            block_type=block_type,
+            children=children,
+            attrs={"item_count": len(children)},
+        )
+
+    # Handle tables
+    if tag_name == "table":
+        rows: list[Block] = []
+        caption_text = None
+
+        # Extract caption if present
+        caption = element.find("caption")
+        if caption:
+            caption_text = caption.get_text(strip=True)
+
+        # Extract rows
+        for tr in element.find_all("tr"):
+            cells: list[Block] = []
+            for cell in tr.find_all(["td", "th"]):
+                cell_type: BlockType = "th" if cell.name == "th" else "td"
+                cell_text = cell.get_text(strip=True)
+                cell_block = Block.create(block_type=cell_type, text=cell_text)
+                cells.append(cell_block)
+
+            if cells:
+                row_block = Block.create(block_type="tr", children=cells)
+                rows.append(row_block)
+
+        if not rows:
+            return None
+
+        attrs: dict = {"row_count": len(rows)}
+        if caption_text:
+            attrs["caption"] = caption_text
+
+        return Block.create(
+            block_type="table",
+            children=rows,
+            attrs=attrs,
+        )
+
+    # Handle blockquotes
+    if tag_name == "blockquote":
+        text = element.get_text(strip=True)
+        if not text:
+            return None
+        return Block.create(block_type="blockquote", text=text)
+
+    # Handle horizontal rules
+    if tag_name == "hr":
+        return Block.create(block_type="hr")
+
+    return None
+
+
+def fetch_url_as_document(
+    url: str,
+    timeout: int = 30,
+    use_firecrawl: bool = True,
+    firecrawl_api_key: Optional[str] = None,
+) -> ContentDocument:
+    """
+    Fetch and extract content from a URL into a ContentDocument.
+
+    V2 Architecture: Returns typed blocks preserving document structure
+    including tables, lists, and proper heading hierarchy.
+
+    Args:
+        url: The URL to fetch content from.
+        timeout: Request timeout in seconds.
+        use_firecrawl: Whether to attempt FireCrawl extraction first.
+        firecrawl_api_key: Optional FireCrawl API key.
+
+    Returns:
+        ContentDocument object with typed blocks.
+
+    Raises:
+        ContentExtractionError: If fetching or parsing fails.
+    """
+    # Validate URL
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ContentExtractionError(f"Invalid URL: {url}")
+
+    # Try FireCrawl first if enabled
+    if use_firecrawl:
+        api_key = firecrawl_api_key or os.environ.get("FIRECRAWL_API_KEY")
+        if api_key:
+            try:
+                from .firecrawl_client import FireCrawlClient, FireCrawlError
+
+                client = FireCrawlClient(api_key=api_key)
+                if client.is_available:
+                    page_meta = client.scrape_url(url, timeout=timeout)
+                    # Convert PageMeta to ContentDocument
+                    return _page_meta_to_document(page_meta, url)
+            except (ImportError, FireCrawlError):
+                pass
+
+    # Traditional extraction with structure preservation
+    try:
+        response = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise ContentExtractionError(f"Failed to fetch URL: {e}")
+
+    html = response.text
+    soup = BeautifulSoup(html, "lxml")
+
+    # Extract meta information
+    title = None
+    title_tag = soup.find("title")
+    if title_tag:
+        title = title_tag.get_text(strip=True)
+
+    meta_description = None
+    meta_desc_tag = soup.find("meta", attrs={"name": "description"})
+    if meta_desc_tag and meta_desc_tag.get("content"):
+        meta_description = meta_desc_tag["content"].strip()
+
+    # Parse content into typed blocks
+    blocks = _parse_html_to_blocks(soup)
+
+    # Add meta blocks at the start
+    meta_blocks: list[Block] = []
+    if title:
+        meta_blocks.append(Block.create(block_type="meta_title", text=title))
+    if meta_description:
+        meta_blocks.append(Block.create(block_type="meta_desc", text=meta_description))
+
+    all_blocks = meta_blocks + blocks
+
+    return ContentDocument(
+        blocks=all_blocks,
+        source_url=url,
+        extracted_title=title,
+        extracted_meta_desc=meta_description,
+        extraction_timestamp=datetime.now().isoformat(),
+    )
+
+
+def _page_meta_to_document(page_meta: PageMeta, url: str) -> ContentDocument:
+    """
+    Convert a PageMeta object to ContentDocument.
+
+    Used when FireCrawl extraction returns PageMeta format.
+
+    Args:
+        page_meta: PageMeta from FireCrawl or other extraction.
+        url: Source URL.
+
+    Returns:
+        ContentDocument with typed blocks.
+    """
+    blocks: list[Block] = []
+
+    # Add meta blocks
+    if page_meta.title:
+        blocks.append(Block.create(block_type="meta_title", text=page_meta.title))
+    if page_meta.meta_description:
+        blocks.append(Block.create(block_type="meta_desc", text=page_meta.meta_description))
+
+    # Add H1 block
+    if page_meta.h1:
+        blocks.append(Block.create(block_type="h1", text=page_meta.h1))
+
+    # Convert content blocks to typed blocks with heuristic detection
+    for content in page_meta.content_blocks:
+        content = content.strip()
+        if not content:
+            continue
+
+        # Detect block type from content characteristics
+        block_type = _infer_block_type_from_text(content)
+        blocks.append(Block.create(block_type=block_type, text=content))
+
+    return ContentDocument(
+        blocks=blocks,
+        source_url=url,
+        extracted_title=page_meta.title,
+        extracted_meta_desc=page_meta.meta_description,
+        extraction_timestamp=datetime.now().isoformat(),
+    )
+
+
+def _infer_block_type_from_text(text: str) -> BlockType:
+    """
+    Infer the block type from text content using heuristics.
+
+    Args:
+        text: Content text.
+
+    Returns:
+        Inferred BlockType.
+    """
+    # Short text without terminal punctuation likely a heading
+    if len(text) < 100 and not text.endswith((".", "!", "?", ":")):
+        # Very short = likely H2, slightly longer = H3
+        if len(text) < 50:
+            return "h2"
+        return "h3"
+
+    # Text starting with bullet indicators
+    if text.startswith(("• ", "- ", "* ", "· ")):
+        return "li"
+
+    # Text starting with numbers and period/parenthesis (ordered list item)
+    if re.match(r"^\d+[\.\)]\s", text):
+        return "li"
+
+    # Default to paragraph
+    return "p"
+
+
+def load_docx_as_document(file_path: Union[str, Path]) -> ContentDocument:
+    """
+    Load and extract content from a Word document into ContentDocument.
+
+    V2 Architecture: Preserves document structure including:
+    - Heading hierarchy (H1-H6)
+    - Paragraphs with run-level formatting
+    - Tables with cell structure
+    - Lists (bullet and numbered)
+
+    Args:
+        file_path: Path to the .docx file.
+
+    Returns:
+        ContentDocument with typed blocks and preserved formatting.
+
+    Raises:
+        ContentExtractionError: If the file cannot be read or parsed.
+    """
+    path = Path(file_path)
+
+    if not path.exists():
+        raise ContentExtractionError(f"File not found: {file_path}")
+
+    if not path.suffix.lower() == ".docx":
+        raise ContentExtractionError(f"File must be a .docx file: {file_path}")
+
+    try:
+        doc = Document(str(path))
+    except Exception as e:
+        raise ContentExtractionError(f"Failed to open Word document: {e}")
+
+    blocks: list[Block] = []
+    extracted_title: Optional[str] = None
+
+    # Process paragraphs
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+
+        # Determine block type from style
+        block_type = _docx_style_to_block_type(para.style.name if para.style else None)
+
+        # Capture title (first H1)
+        if block_type == "h1" and extracted_title is None:
+            extracted_title = text
+
+        # Extract runs for formatting preservation
+        runs = _extract_docx_runs(para)
+
+        block = Block.create(
+            block_type=block_type,
+            text=text,
+            runs=runs if runs else None,
+            attrs={"style_name": para.style.name if para.style else None},
+        )
+        blocks.append(block)
+
+    # Process tables
+    for table in doc.tables:
+        table_block = _extract_docx_table(table)
+        if table_block:
+            blocks.append(table_block)
+
+    return ContentDocument(
+        blocks=blocks,
+        source_docx_path=str(path),
+        extracted_title=extracted_title,
+        extraction_timestamp=datetime.now().isoformat(),
+    )
+
+
+def _docx_style_to_block_type(style_name: Optional[str]) -> BlockType:
+    """
+    Map Word document style name to BlockType.
+
+    Args:
+        style_name: Word style name.
+
+    Returns:
+        Corresponding BlockType.
+    """
+    if not style_name:
+        return "p"
+
+    style_lower = style_name.lower()
+
+    # Handle heading styles
+    if style_lower.startswith("heading"):
+        try:
+            level = int(style_lower.replace("heading", "").strip())
+            if 1 <= level <= 6:
+                return f"h{level}"  # type: ignore
+        except ValueError:
+            pass
+        return "h2"  # Default for unrecognized heading
+
+    if style_lower == "title":
+        return "h1"
+
+    if "list" in style_lower or "bullet" in style_lower:
+        return "li"
+
+    if "quote" in style_lower:
+        return "blockquote"
+
+    return "p"
+
+
+def _extract_docx_runs(paragraph) -> list[Run]:
+    """
+    Extract formatted runs from a DOCX paragraph.
+
+    Args:
+        paragraph: python-docx paragraph object.
+
+    Returns:
+        List of Run objects with formatting preserved.
+    """
+    runs: list[Run] = []
+
+    for run in paragraph.runs:
+        if not run.text:
+            continue
+
+        runs.append(Run(
+            text=run.text,
+            bold=run.bold or False,
+            italic=run.italic or False,
+            underline=run.underline is not None and run.underline,
+            strike=run.font.strike or False,
+            font_name=run.font.name,
+            font_size=run.font.size.pt if run.font.size else None,
+        ))
+
+    return runs
+
+
+def _extract_docx_table(table) -> Optional[Block]:
+    """
+    Extract a table from DOCX into a Block structure.
+
+    Args:
+        table: python-docx table object.
+
+    Returns:
+        Block representing the table, or None if empty.
+    """
+    rows: list[Block] = []
+
+    for row in table.rows:
+        cells: list[Block] = []
+        is_header_row = False
+
+        for idx, cell in enumerate(row.cells):
+            cell_text = cell.text.strip()
+
+            # Detect header row (first row or cells with bold text)
+            if idx == 0 and cell.paragraphs:
+                for para in cell.paragraphs:
+                    for run in para.runs:
+                        if run.bold:
+                            is_header_row = True
+                            break
+
+            cell_type: BlockType = "th" if is_header_row else "td"
+            cell_block = Block.create(block_type=cell_type, text=cell_text)
+            cells.append(cell_block)
+
+        if cells:
+            row_block = Block.create(block_type="tr", children=cells)
+            rows.append(row_block)
+
+    if not rows:
+        return None
+
+    return Block.create(
+        block_type="table",
+        children=rows,
+        attrs={"row_count": len(rows)},
+    )
+
+
+def load_content_as_document(source: str) -> ContentDocument:
+    """
+    Load content from either a URL or a file path into ContentDocument.
+
+    V2 Architecture: Unified loader that returns ContentDocument with
+    typed blocks regardless of source type.
+
+    Args:
+        source: URL or file path to load content from.
+
+    Returns:
+        ContentDocument with typed blocks.
+
+    Raises:
+        ContentExtractionError: If the source is invalid or cannot be loaded.
+    """
+    # Check if it's a URL
+    parsed = urlparse(source)
+    if parsed.scheme in ("http", "https"):
+        return fetch_url_as_document(source)
+
+    # Check if it's a file path
+    path = Path(source)
+    if path.suffix.lower() == ".docx":
+        return load_docx_as_document(path)
+
+    raise ContentExtractionError(
+        f"Invalid source: {source}. Must be a URL (http/https) or a .docx file path."
+    )
