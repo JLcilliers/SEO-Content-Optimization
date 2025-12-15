@@ -2655,7 +2655,7 @@ Professional {keyword} solutions provide reliable security for businesses of all
         headings_text = " ".join(
             strip_markers(block.text)
             for block in optimized_blocks
-            if block.is_heading and block.heading_level > 1
+            if block.is_heading and block.heading_level != HeadingLevel.H1
         ).lower()
 
         # Body text (non-heading blocks only)
