@@ -68,6 +68,147 @@ class ContentExtractionError(Exception):
     pass
 
 
+# Extraction quality thresholds
+MIN_WORD_COUNT = 100  # Minimum words for "good" extraction
+MIN_BLOCK_COUNT = 3   # Minimum content blocks
+MIN_HEADING_COUNT = 1  # At least one heading expected
+
+
+def _trafilatura_extraction_ladder(html: str, soup: BeautifulSoup) -> tuple[list[str], str]:
+    """
+    Multi-stage trafilatura extraction with automatic fallbacks.
+
+    EXTRACTION LADDER (in order of precision -> recall):
+    1. trafilatura.extract() with favor_recall=True (balanced)
+    2. trafilatura.extract() with favor_precision=False (more recall)
+    3. trafilatura.bare_extraction() baseline (maximum recall)
+    4. BeautifulSoup fallback (DOM-based, captures everything)
+
+    Each stage checks extraction quality. If insufficient, escalates to next.
+
+    Args:
+        html: Raw HTML content.
+        soup: BeautifulSoup parsed HTML (for fallback).
+
+    Returns:
+        Tuple of (content_blocks, extraction_method_used).
+    """
+    import sys
+
+    # Stage 1: Balanced extraction with favor_recall
+    try:
+        content = trafilatura.extract(
+            html,
+            include_comments=False,
+            include_tables=True,
+            include_links=False,
+            include_images=False,
+            favor_recall=True,
+            favor_precision=False,
+        )
+        if content:
+            blocks = _split_to_blocks(content)
+            if _extraction_quality_ok(blocks, "trafilatura_favor_recall"):
+                return blocks, "trafilatura_favor_recall"
+            print(f"DEBUG: Stage 1 insufficient ({len(blocks)} blocks), escalating...", file=sys.stderr)
+    except Exception as e:
+        print(f"DEBUG: Stage 1 failed: {e}", file=sys.stderr)
+
+    # Stage 2: Maximum recall settings
+    try:
+        content = trafilatura.extract(
+            html,
+            include_comments=False,
+            include_tables=True,
+            include_links=True,  # Include more
+            include_images=False,
+            favor_recall=True,
+            favor_precision=False,
+            no_fallback=False,
+        )
+        if content:
+            blocks = _split_to_blocks(content)
+            if _extraction_quality_ok(blocks, "trafilatura_max_recall"):
+                return blocks, "trafilatura_max_recall"
+            print(f"DEBUG: Stage 2 insufficient ({len(blocks)} blocks), escalating...", file=sys.stderr)
+    except Exception as e:
+        print(f"DEBUG: Stage 2 failed: {e}", file=sys.stderr)
+
+    # Stage 3: Try bare_extraction for raw content (if available)
+    try:
+        if hasattr(trafilatura, 'bare_extraction'):
+            result = trafilatura.bare_extraction(html)
+            if result and isinstance(result, dict):
+                # bare_extraction returns a dict with 'text' key
+                content = result.get('text', '')
+                if content:
+                    blocks = _split_to_blocks(content)
+                    if _extraction_quality_ok(blocks, "trafilatura_bare"):
+                        return blocks, "trafilatura_bare"
+                    print(f"DEBUG: Stage 3 insufficient ({len(blocks)} blocks), escalating...", file=sys.stderr)
+    except Exception as e:
+        print(f"DEBUG: Stage 3 failed: {e}", file=sys.stderr)
+
+    # Stage 4: Try html2txt for maximum text extraction (if available)
+    try:
+        if hasattr(trafilatura, 'html2txt'):
+            content = trafilatura.html2txt(html)
+            if content:
+                blocks = _split_to_blocks(content)
+                if _extraction_quality_ok(blocks, "trafilatura_html2txt"):
+                    return blocks, "trafilatura_html2txt"
+                print(f"DEBUG: Stage 4 insufficient ({len(blocks)} blocks), escalating...", file=sys.stderr)
+    except Exception as e:
+        print(f"DEBUG: Stage 4 failed: {e}", file=sys.stderr)
+
+    # Stage 5: Final fallback - BeautifulSoup DOM extraction
+    print(f"DEBUG: All trafilatura methods insufficient, using BeautifulSoup fallback", file=sys.stderr)
+    blocks = _extract_content_fallback(soup)
+    return blocks, "beautifulsoup_fallback"
+
+
+def _split_to_blocks(content: str) -> list[str]:
+    """Split extracted content into paragraph blocks."""
+    if not content:
+        return []
+    # Split on double newlines (paragraph boundaries)
+    paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
+    # Also handle single newlines for list items etc.
+    if len(paragraphs) < 3:
+        paragraphs = [p.strip() for p in content.split("\n") if p.strip() and len(p.strip()) > 10]
+    return paragraphs
+
+
+def _extraction_quality_ok(blocks: list[str], method: str) -> bool:
+    """
+    Check if extraction quality meets minimum thresholds.
+
+    Args:
+        blocks: Extracted content blocks.
+        method: Extraction method name (for logging).
+
+    Returns:
+        True if quality is acceptable.
+    """
+    if not blocks:
+        return False
+
+    # Count total words
+    total_words = sum(len(block.split()) for block in blocks)
+
+    # Count substantial blocks (more than 5 words)
+    substantial_blocks = sum(1 for block in blocks if len(block.split()) > 5)
+
+    # Check thresholds
+    if total_words < MIN_WORD_COUNT:
+        return False
+
+    if substantial_blocks < MIN_BLOCK_COUNT:
+        return False
+
+    return True
+
+
 def fetch_url_content(
     url: str,
     timeout: int = 30,
@@ -142,25 +283,20 @@ def fetch_url_content(
     if h1_tag:
         h1 = h1_tag.get_text(strip=True)
 
-    # Extract main content using trafilatura (if available)
+    # Extract main content using EXTRACTION LADDER approach
+    # This ensures maximum content recall with multiple fallback strategies
     content_blocks: list[str] = []
+    extraction_method = "none"
 
     if trafilatura:
-        # trafilatura extracts main article content, removing boilerplate
-        main_content = trafilatura.extract(
-            html,
-            include_comments=False,
-            include_tables=True,
-            no_fallback=False,
-            favor_precision=True,
-        )
-        if main_content:
-            # Split into paragraphs
-            paragraphs = [p.strip() for p in main_content.split("\n\n") if p.strip()]
-            content_blocks = paragraphs
+        content_blocks, extraction_method = _trafilatura_extraction_ladder(html, soup)
     else:
-        # Fallback: extract text from common content containers
+        # No trafilatura - use BeautifulSoup fallback
         content_blocks = _extract_content_fallback(soup)
+        extraction_method = "beautifulsoup_fallback"
+
+    import sys
+    print(f"DEBUG: Extraction method used: {extraction_method}, blocks: {len(content_blocks)}", file=sys.stderr)
 
     # CRITICAL: Apply text repair to fix encoding issues and mojibake
     # This prevents corruption like "â€™" appearing instead of apostrophes
