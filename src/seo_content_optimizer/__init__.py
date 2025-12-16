@@ -62,6 +62,39 @@ from .optimizer_v2 import (
     optimize_content_v2,
 )
 
+# Pipeline improvement modules (2024 reliability fixes)
+from .text_repair import (
+    repair_text,
+    repair_mojibake,
+    normalize_whitespace,
+    validate_text_quality,
+    repair_content_blocks,
+)
+
+from .page_archetype import (
+    detect_page_archetype,
+    filter_guide_phrases,
+    get_content_guidance,
+    ArchetypeResult,
+)
+
+from .claim_validator import (
+    extract_facts_ledger,
+    validate_generated_content,
+    remove_hallucinated_claims,
+    get_allowed_claims,
+    FactsLedger,
+)
+
+from .repetition_guard import (
+    find_duplicate_sentences,
+    find_near_duplicate_sentences,
+    remove_duplicate_sentences,
+    check_keyword_density,
+    clean_repetition,
+    KeywordDensityConfig,
+)
+
 __all__ = [
     # Legacy models
     "Keyword",
@@ -101,4 +134,29 @@ __all__ = [
     "ContentOptimizerV2",
     "V2OptimizationConfig",
     "optimize_content_v2",
+    # Pipeline improvements (2024 reliability fixes)
+    # Text repair
+    "repair_text",
+    "repair_mojibake",
+    "normalize_whitespace",
+    "validate_text_quality",
+    "repair_content_blocks",
+    # Page archetype
+    "detect_page_archetype",
+    "filter_guide_phrases",
+    "get_content_guidance",
+    "ArchetypeResult",
+    # Claim validation
+    "extract_facts_ledger",
+    "validate_generated_content",
+    "remove_hallucinated_claims",
+    "get_allowed_claims",
+    "FactsLedger",
+    # Repetition guard
+    "find_duplicate_sentences",
+    "find_near_duplicate_sentences",
+    "remove_duplicate_sentences",
+    "check_keyword_density",
+    "clean_repetition",
+    "KeywordDensityConfig",
 ]

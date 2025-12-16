@@ -66,6 +66,87 @@ def sanitize_for_xml(text: str) -> str:
     return _INVALID_XML_CHARS_RE.sub("", text)
 
 
+# MARKER LEAKAGE PREVENTION
+# These patterns detect markers that may have leaked into output
+MARKER_LEAK_PATTERNS = [
+    r"\[\[\[ADD\]\]\]",      # Main marker start
+    r"\[\[\[ENDADD\]\]\]",   # Main marker end
+    r"add\.\.\.endadd",       # Corrupted marker pattern
+    r"\[add\]",              # Lowercase variant
+    r"\[/add\]",             # HTML-style variant
+    r"<<<ADD>>>",            # Alternative marker style
+    r"<<<ENDADD>>>",         # Alternative marker style
+]
+
+
+def validate_no_marker_leakage(text: str) -> tuple[bool, list[str]]:
+    """
+    Validate that text doesn't contain leaked marker tokens.
+
+    CRITICAL: This is a final safety check to ensure no markers
+    appear in visible output text.
+
+    Args:
+        text: Text to validate.
+
+    Returns:
+        Tuple of (is_valid, list of found leak patterns).
+    """
+    if not text:
+        return True, []
+
+    found_leaks = []
+    text_lower = text.lower()
+
+    for pattern in MARKER_LEAK_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            found_leaks.append(pattern)
+
+    # Also check for partial markers
+    partial_markers = [
+        "[[[", "]]]",  # Bracket patterns
+        "ENDADD", "[[ADD",  # Partial marker text
+    ]
+    for marker in partial_markers:
+        if marker in text:
+            found_leaks.append(f"partial marker: {marker}")
+
+    return len(found_leaks) == 0, found_leaks
+
+
+def strip_leaked_markers(text: str) -> str:
+    """
+    Remove any leaked markers from text as a safety net.
+
+    This should only catch edge cases where markers weren't
+    properly processed. The main processing should handle markers
+    correctly, but this provides a backup.
+
+    Args:
+        text: Text that may contain leaked markers.
+
+    Returns:
+        Cleaned text with markers removed.
+    """
+    if not text:
+        return text
+
+    result = text
+
+    # Remove known marker patterns
+    result = result.replace(MARK_START, "")
+    result = result.replace(MARK_END, "")
+
+    # Remove any partial/corrupted marker patterns
+    for pattern in MARKER_LEAK_PATTERNS:
+        result = re.sub(pattern, "", result, flags=re.IGNORECASE)
+
+    # Clean up resulting double spaces
+    result = re.sub(r" +", " ", result)
+
+    return result.strip()
+
+
 def set_cell_shading(cell, color: str) -> None:
     """Set background color/shading for a table cell."""
     tc = cell._tc
@@ -149,6 +230,8 @@ def add_marked_text(paragraph: Paragraph, text: str, font_name: str = "Poppins")
     This is the single canonical way to add optimized text with highlights.
     Text is sanitized to remove invalid XML characters before insertion.
 
+    MARKER LEAKAGE PREVENTION: Malformed markers are stripped, not outputted.
+
     Args:
         paragraph: The paragraph to add text to.
         text: Text with optional [[[ADD]]]...[[[ENDADD]]] markers.
@@ -165,31 +248,44 @@ def add_marked_text(paragraph: Paragraph, text: str, font_name: str = "Poppins")
         start = text.find(MARK_START)
         if start == -1:
             # No more markers - add remaining text as plain
+            # SAFETY: Validate no leaked markers in plain text
             if text:
-                run = paragraph.add_run(text)
-                run.font.name = font_name
+                clean_text = strip_leaked_markers(text)
+                if clean_text:
+                    run = paragraph.add_run(clean_text)
+                    run.font.name = font_name
             break
 
         # Add plain prefix before the marker
         if start > 0:
-            run = paragraph.add_run(text[:start])
-            run.font.name = font_name
+            # SAFETY: Strip any leaked markers from plain text
+            prefix = strip_leaked_markers(text[:start])
+            if prefix:
+                run = paragraph.add_run(prefix)
+                run.font.name = font_name
 
         # Find closing marker
         end = text.find(MARK_END, start)
         if end == -1:
-            # Malformed: no closing marker, dump the rest as plain text
-            run = paragraph.add_run(text[start:])
-            run.font.name = font_name
+            # Malformed: no closing marker
+            # SAFETY: Strip the marker text and output as plain
+            remaining = text[start + len(MARK_START):]  # Skip the malformed start marker
+            clean_remaining = strip_leaked_markers(remaining)
+            if clean_remaining:
+                run = paragraph.add_run(clean_remaining)
+                run.font.name = font_name
             break
 
         # Extract and add highlighted content
         highlighted = text[start + len(MARK_START): end]
         if highlighted:
-            run = paragraph.add_run(highlighted)
-            run.font.name = font_name
-            # CRITICAL: Use the official enum for proper Word compatibility
-            run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
+            # SAFETY: Validate highlighted content has no nested markers
+            clean_highlighted = strip_leaked_markers(highlighted)
+            if clean_highlighted:
+                run = paragraph.add_run(clean_highlighted)
+                run.font.name = font_name
+                # CRITICAL: Use the official enum for proper Word compatibility
+                run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
 
         # Continue after the closing marker
         text = text[end + len(MARK_END):]

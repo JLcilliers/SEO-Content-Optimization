@@ -75,6 +75,12 @@ from .models import (
     ParagraphBlock,
 )
 from .prioritizer import create_keyword_plan
+from .page_archetype import (
+    detect_page_archetype,
+    filter_guide_phrases,
+    get_content_guidance,
+    ArchetypeResult,
+)
 
 
 @dataclass
@@ -130,20 +136,29 @@ class ScopedKeywordCounts:
         return max(0, self.target - self.counts.body)
 
 
-def ensure_keyword_in_text(text: str, keyword: str, position: str = "start") -> str:
+def ensure_keyword_in_text(
+    text: str,
+    keyword: str,
+    position: str = "start",
+    max_length: int = 0,
+    element_type: str = "general",
+) -> str:
     """
-    DETERMINISTIC: Ensure exact keyword phrase appears in text.
+    DETERMINISTIC: Ensure exact keyword phrase appears in text naturally.
 
-    If keyword is already present (case-insensitive), return text unchanged.
-    Otherwise, prepend/append the keyword with appropriate formatting.
-
-    This is a PROGRAMMATIC GUARANTEE - if the LLM doesn't include the keyword,
-    we inject it ourselves.
+    IMPROVED: No longer uses crude "keyword:" prefix. Instead:
+    1. Returns unchanged if keyword already present
+    2. For titles: Integrates keyword naturally at beginning
+    3. For descriptions: Integrates keyword in first sentence
+    4. For headings: Prepends keyword phrase naturally
+    5. Enforces length constraints AFTER integration
 
     Args:
         text: The text to check/modify.
         keyword: The EXACT keyword phrase that must appear.
         position: Where to inject if missing - "start" or "end".
+        max_length: Maximum length constraint (0 = no limit).
+        element_type: Type of element - "title", "description", "h1", "general".
 
     Returns:
         Text guaranteed to contain the exact keyword phrase.
@@ -155,18 +170,134 @@ def ensure_keyword_in_text(text: str, keyword: str, position: str = "start") -> 
     if keyword.lower() in text.lower():
         return text
 
-    # Keyword missing - inject it
-    if position == "start":
-        # Prepend keyword with separator
-        return f"{keyword}: {text}"
+    # IMPROVED: Natural keyword integration based on element type
+    result = text
+
+    if element_type == "title":
+        # For titles: Use natural phrasing patterns
+        # Instead of "keyword: text", use "Keyword - Text" or "Text | Keyword"
+        result = _integrate_keyword_title(text, keyword)
+    elif element_type == "description":
+        # For descriptions: Integrate into first sentence naturally
+        result = _integrate_keyword_description(text, keyword)
+    elif element_type == "h1":
+        # For H1: Use natural heading phrasing
+        result = _integrate_keyword_heading(text, keyword)
     else:
-        # Append keyword
-        if text.rstrip().endswith((".", "!", "?")):
-            # Insert before final punctuation
+        # General text: Natural sentence integration
+        if position == "start":
+            # Avoid colon prefix - use proper sentence structure
+            result = _integrate_keyword_general(text, keyword, at_start=True)
+        else:
+            result = _integrate_keyword_general(text, keyword, at_start=False)
+
+    # ENFORCE LENGTH CONSTRAINTS after integration
+    if max_length > 0 and len(result) > max_length:
+        # Try to shorten while keeping keyword
+        result = _shorten_with_keyword(result, keyword, max_length)
+
+    return result
+
+
+def _integrate_keyword_title(text: str, keyword: str) -> str:
+    """Integrate keyword into title naturally."""
+    # Pattern: "Keyword for/in Topic" or "Topic | Keyword"
+    # Check if text already starts with common words that blend well
+    lower_text = text.lower()
+
+    # If title is very short, just prepend naturally
+    if len(text) < 30:
+        return f"{keyword.title()} - {text}"
+
+    # If title has a pipe or dash, use that structure
+    if " | " in text:
+        parts = text.split(" | ", 1)
+        return f"{keyword.title()} | {parts[-1]}"
+    elif " - " in text:
+        parts = text.split(" - ", 1)
+        return f"{keyword.title()} - {parts[-1]}"
+
+    # Default: Clean prefix without colon
+    return f"{keyword.title()} - {text}"
+
+
+def _integrate_keyword_description(text: str, keyword: str) -> str:
+    """Integrate keyword into meta description naturally."""
+    # Find first sentence end
+    sentences = text.split(". ")
+    if len(sentences) > 1:
+        # Insert keyword phrase into flow
+        first = sentences[0]
+        rest = ". ".join(sentences[1:])
+        # Add keyword to first sentence naturally
+        if first.endswith(("s", "es", "ing")):
+            return f"{first} for {keyword}. {rest}"
+        else:
+            return f"Discover {keyword}. {text}"
+    else:
+        # Single sentence - prepend naturally
+        return f"Learn about {keyword}. {text}"
+
+
+def _integrate_keyword_heading(text: str, keyword: str) -> str:
+    """Integrate keyword into H1 heading naturally."""
+    # If heading already includes the topic, just prepend
+    # Avoid patterns like "keyword: heading"
+    if len(text) < 40:
+        return f"{keyword.title()}: {text}"
+
+    # For longer headings, try to integrate
+    return f"{keyword.title()} - {text}"
+
+
+def _integrate_keyword_general(text: str, keyword: str, at_start: bool = True) -> str:
+    """Integrate keyword into general text naturally."""
+    if at_start:
+        # Find first sentence and integrate
+        if ". " in text:
+            first_sentence, rest = text.split(". ", 1)
+            return f"{first_sentence} featuring {keyword}. {rest}"
+        else:
+            return f"Explore {keyword}. {text}"
+    else:
+        # Integrate at end naturally
+        if text.rstrip().endswith((".","!", "?")):
             text_stripped = text.rstrip()
-            punct = text_stripped[-1]
-            return f"{text_stripped[:-1]} - {keyword}{punct}"
-        return f"{text} - {keyword}"
+            return f"{text_stripped[:-1]} with {keyword}{text_stripped[-1]}"
+        return f"{text} featuring {keyword}"
+
+
+def _shorten_with_keyword(text: str, keyword: str, max_length: int) -> str:
+    """Shorten text while preserving keyword."""
+    if len(text) <= max_length:
+        return text
+
+    # Find keyword position
+    keyword_lower = keyword.lower()
+    text_lower = text.lower()
+    keyword_start = text_lower.find(keyword_lower)
+
+    if keyword_start == -1:
+        # Keyword not found, just truncate
+        return text[:max_length-3] + "..."
+
+    keyword_end = keyword_start + len(keyword)
+
+    # Calculate how much we need to remove
+    excess = len(text) - max_length
+
+    # Try removing from the end first (after keyword)
+    if keyword_end < len(text) - excess - 3:
+        # We can truncate after keyword
+        return text[:max_length-3] + "..."
+
+    # Try removing from middle (between keyword and end)
+    # Keep keyword at start and truncate middle
+    if keyword_start < 5:  # Keyword is near start
+        return text[:max_length-3] + "..."
+
+    # Keep keyword area, truncate everything else
+    return text[:keyword_end + 3] + "..." if len(text[:keyword_end + 3]) < max_length else keyword
 
 
 def count_keyword_in_text(text: str, keyword: str) -> int:
@@ -317,6 +448,27 @@ class ContentOptimizer:
             "original_spelling": brand_name,  # Exact original spelling to preserve
         }
 
+        # Step 0.7: PAGE ARCHETYPE DETECTION
+        # This prevents applying wrong content styles (e.g., "guide" framing on landing pages)
+        url = content.url if isinstance(content, PageMeta) else None
+        h1 = content.h1 if isinstance(content, PageMeta) else (content.h1 if hasattr(content, 'h1') else None)
+        title = content.title if isinstance(content, PageMeta) else None
+        headings = []
+        if isinstance(content, PageMeta):
+            headings = content.content_blocks[:10]  # First 10 blocks may contain headings
+        self._page_archetype = detect_page_archetype(
+            url=url,
+            title=title,
+            h1=h1,
+            content_text=full_text,
+            headings=headings,
+        )
+        import sys
+        print(f"DEBUG: Page archetype detected: {self._page_archetype.archetype} "
+              f"(confidence: {self._page_archetype.confidence:.2f})", file=sys.stderr)
+        if not self._page_archetype.allows_guide_framing:
+            print(f"DEBUG: Guide framing BLOCKED for this page type", file=sys.stderr)
+
         # Step 1: Analyze content (with filtered keywords)
         analysis = analyze_content(content, filtered_keywords)
 
@@ -432,8 +584,13 @@ class ContentOptimizer:
 
         # Step 6: Generate FAQ if requested (Part 10 of 10-Part Framework)
         # Uses optimization plan's faq_keywords for targeted keyword integration
+        # ARCHETYPE CHECK: Only generate FAQ if archetype supports it
         faq_items = []
-        if generate_faq:
+        should_generate_faq = generate_faq and self._page_archetype.should_add_faq
+        if not should_generate_faq and generate_faq:
+            print(f"DEBUG: FAQ generation SKIPPED - archetype '{self._page_archetype.archetype}' "
+                  "does not recommend FAQ", file=sys.stderr)
+        if should_generate_faq:
             faq_items = self._generate_faq(
                 topic=analysis.topic,
                 keyword_plan=keyword_plan,
@@ -652,7 +809,11 @@ class ContentOptimizer:
         )
         # DETERMINISTIC KEYWORD GUARANTEE: Primary keyword MUST appear (Tier 1)
         # Do this BEFORE adding markers so the injection is clean
-        optimized_title_raw = ensure_keyword_in_text(optimized_title_raw, primary, position="start")
+        # IMPROVED: Use element_type and max_length for natural integration
+        optimized_title_raw = ensure_keyword_in_text(
+            optimized_title_raw, primary, position="start",
+            max_length=60, element_type="title"
+        )
 
         # BRAND NAME NORMALIZATION: Ensure LLM output uses original brand spelling
         # This prevents "Cell-Gate" when original says "CellGate"
@@ -692,7 +853,11 @@ class ContentOptimizer:
             optimized_desc_raw, current_meta_desc or "", "meta_description"
         )
         # DETERMINISTIC KEYWORD GUARANTEE: Primary keyword MUST appear
-        optimized_desc_raw = ensure_keyword_in_text(optimized_desc_raw, primary, position="start")
+        # IMPROVED: Use element_type and max_length for natural integration
+        optimized_desc_raw = ensure_keyword_in_text(
+            optimized_desc_raw, primary, position="start",
+            max_length=160, element_type="description"
+        )
 
         # BRAND NAME NORMALIZATION: Ensure LLM output uses original brand spelling
         if self._brand_context and self._brand_context.get("name"):
@@ -731,7 +896,11 @@ class ContentOptimizer:
             optimized_h1_raw, current_h1 or "", "h1"
         )
         # DETERMINISTIC KEYWORD GUARANTEE: Primary keyword MUST appear (Tier 2)
-        optimized_h1_raw = ensure_keyword_in_text(optimized_h1_raw, primary, position="start")
+        # IMPROVED: Use element_type for natural H1 integration
+        optimized_h1_raw = ensure_keyword_in_text(
+            optimized_h1_raw, primary, position="start",
+            max_length=0, element_type="h1"
+        )
 
         # BRAND NAME NORMALIZATION: Ensure LLM output uses original brand spelling
         if self._brand_context and self._brand_context.get("name"):

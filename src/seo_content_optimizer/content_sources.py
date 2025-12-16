@@ -38,6 +38,7 @@ from .models import (
     ContentDocument,
     BlockType,
 )
+from .text_repair import repair_text, repair_content_blocks, validate_text_quality
 
 
 # Default headers for web requests
@@ -161,11 +162,22 @@ def fetch_url_content(
         # Fallback: extract text from common content containers
         content_blocks = _extract_content_fallback(soup)
 
+    # CRITICAL: Apply text repair to fix encoding issues and mojibake
+    # This prevents corruption like "â€™" appearing instead of apostrophes
+    title_repaired, _ = repair_text(title) if title else (title, False)
+    meta_description_repaired, _ = repair_text(meta_description) if meta_description else (meta_description, False)
+    h1_repaired, _ = repair_text(h1) if h1 else (h1, False)
+    content_blocks_repaired, corruption_count = repair_content_blocks(content_blocks)
+
+    if corruption_count > 0:
+        import sys
+        print(f"WARNING: Repaired encoding corruption in {corruption_count} content blocks", file=sys.stderr)
+
     return PageMeta(
-        title=title,
-        meta_description=meta_description,
-        h1=h1,
-        content_blocks=content_blocks,
+        title=title_repaired,
+        meta_description=meta_description_repaired,
+        h1=h1_repaired,
+        content_blocks=content_blocks_repaired,
         url=url,
     )
 
@@ -173,6 +185,12 @@ def fetch_url_content(
 def _extract_content_fallback(soup: BeautifulSoup) -> list[str]:
     """
     Fallback content extraction when trafilatura is not available.
+
+    ENHANCED FOR HOMEPAGE/LANDING PAGES:
+    - Does NOT drop short blocks (homepages are made of short blocks)
+    - Extracts all text nodes including CTAs, stats, testimonials
+    - Preserves cards, features, and promotional content
+    - Includes address/contact/legal blocks
 
     Args:
         soup: BeautifulSoup parsed HTML.
@@ -182,16 +200,17 @@ def _extract_content_fallback(soup: BeautifulSoup) -> list[str]:
     """
     content_blocks: list[str] = []
 
-    # Remove script, style, nav, header, footer elements
-    for tag in soup.find_all(["script", "style", "nav", "header", "footer", "aside"]):
+    # Remove script, style, and truly navigational elements
+    # NOTE: Keep header/footer for homepages as they may contain key content
+    for tag in soup.find_all(["script", "style", "noscript", "iframe"]):
         tag.decompose()
 
-    # Look for common content containers
+    # Look for main content container but fall back to body for landing pages
     main_content = (
         soup.find("main")
         or soup.find("article")
-        or soup.find("div", class_=re.compile(r"content|post|entry|article", re.I))
-        or soup.find("div", id=re.compile(r"content|post|entry|article", re.I))
+        or soup.find("div", class_=re.compile(r"content|post|entry|article|body|wrapper|container", re.I))
+        or soup.find("div", id=re.compile(r"content|post|entry|article|main|app", re.I))
     )
 
     if main_content:
@@ -199,11 +218,46 @@ def _extract_content_fallback(soup: BeautifulSoup) -> list[str]:
     else:
         source = soup.body or soup
 
-    # Extract paragraphs and headings
-    for element in source.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li"]):
-        text = element.get_text(strip=True)
-        if text and len(text) > 20:  # Skip very short snippets
-            content_blocks.append(text)
+    # Extract ALL text-bearing elements (not just p/h/li)
+    # This captures cards, stats, CTAs, testimonials common on homepages
+    text_elements = [
+        "p", "h1", "h2", "h3", "h4", "h5", "h6", "li",
+        "span", "div", "a", "button", "label",  # Interactive/card elements
+        "blockquote", "figcaption", "cite",  # Quotes/testimonials
+        "address", "time",  # Contact/date info
+        "td", "th", "caption",  # Table content
+    ]
+
+    seen_texts = set()  # Deduplicate exact matches
+
+    for element in source.find_all(text_elements):
+        # Get direct text content (avoid nested duplication)
+        text = element.get_text(separator=" ", strip=True)
+
+        if not text:
+            continue
+
+        # Normalize whitespace
+        text = " ".join(text.split())
+
+        # Skip if already seen (exact match)
+        if text in seen_texts:
+            continue
+
+        # IMPORTANT: Do NOT skip short blocks for homepages
+        # Short blocks include: CTAs, stats, feature headlines, nav items
+        # Only skip truly trivial content (< 3 chars or just punctuation)
+        if len(text) < 3 or text.strip() in [".", ",", "-", "•", "|"]:
+            continue
+
+        # Skip pure navigation/social links
+        if element.name == "a" and element.get("href", "").startswith(("#", "javascript:", "mailto:", "tel:")):
+            # But keep if it has substantial text (could be a CTA)
+            if len(text) < 10:
+                continue
+
+        seen_texts.add(text)
+        content_blocks.append(text)
 
     return content_blocks
 

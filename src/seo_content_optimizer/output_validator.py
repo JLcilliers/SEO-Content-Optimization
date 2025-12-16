@@ -368,6 +368,206 @@ def validate_block_preservation(
     return True, ""
 
 
+# =============================================================================
+# ENHANCED BLOCK-LEVEL VALIDATION
+# =============================================================================
+# These functions provide granular block-level validation to ensure
+# every original block is present in the output (with allowed edits).
+
+
+def _normalize_text_for_matching(text: str) -> str:
+    """Normalize text for block matching comparison."""
+    if not text:
+        return ""
+    # Lowercase, collapse whitespace, remove punctuation
+    text = text.lower()
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[^\w\s]', '', text)
+    return text.strip()
+
+
+def _calculate_text_overlap(text1: str, text2: str) -> float:
+    """
+    Calculate overlap between two texts (0.0 to 1.0).
+
+    Uses word-level Jaccard similarity.
+    """
+    if not text1 or not text2:
+        return 0.0
+
+    words1 = set(_normalize_text_for_matching(text1).split())
+    words2 = set(_normalize_text_for_matching(text2).split())
+
+    if not words1 or not words2:
+        return 0.0
+
+    intersection = words1 & words2
+    union = words1 | words2
+
+    return len(intersection) / len(union) if union else 0.0
+
+
+def validate_blocks_with_matching(
+    original_blocks: list[str],
+    optimized_blocks: list[str],
+    min_match_threshold: float = 0.50,
+) -> tuple[bool, list[str], list[str]]:
+    """
+    Validate that each original block has a corresponding match in optimized output.
+
+    Uses text overlap matching to handle rewrites while detecting deletions.
+
+    Args:
+        original_blocks: List of original text blocks.
+        optimized_blocks: List of optimized text blocks.
+        min_match_threshold: Minimum overlap to consider a match (0.0-1.0).
+
+    Returns:
+        Tuple of (is_valid, unmatched_blocks, match_report).
+        unmatched_blocks contains original blocks with no match in output.
+    """
+    if not original_blocks:
+        return True, [], ["No original blocks to validate"]
+
+    unmatched = []
+    match_report = []
+
+    for i, orig_block in enumerate(original_blocks):
+        if not orig_block or len(orig_block.strip()) < 10:
+            # Skip very short blocks
+            continue
+
+        # Try to find a matching block in optimized output
+        best_match_score = 0.0
+        best_match_idx = -1
+
+        for j, opt_block in enumerate(optimized_blocks):
+            if not opt_block:
+                continue
+
+            overlap = _calculate_text_overlap(orig_block, opt_block)
+            if overlap > best_match_score:
+                best_match_score = overlap
+                best_match_idx = j
+
+        if best_match_score >= min_match_threshold:
+            match_report.append(
+                f"Block {i}: matched to output block {best_match_idx} "
+                f"(overlap: {best_match_score:.1%})"
+            )
+        else:
+            unmatched.append(orig_block)
+            match_report.append(
+                f"Block {i}: NO MATCH (best overlap: {best_match_score:.1%})"
+            )
+
+    is_valid = len(unmatched) == 0
+    return is_valid, unmatched, match_report
+
+
+def restore_missing_blocks(
+    original_blocks: list[str],
+    optimized_blocks: list[str],
+    min_match_threshold: float = 0.50,
+) -> list[str]:
+    """
+    Restore any missing original blocks to the optimized output.
+
+    If a block was deleted during optimization, this function
+    adds it back (unchanged) to ensure no content loss.
+
+    Args:
+        original_blocks: List of original text blocks.
+        optimized_blocks: List of optimized text blocks.
+        min_match_threshold: Minimum overlap to consider a match.
+
+    Returns:
+        List of blocks with missing originals restored.
+    """
+    is_valid, unmatched, _ = validate_blocks_with_matching(
+        original_blocks, optimized_blocks, min_match_threshold
+    )
+
+    if is_valid:
+        return optimized_blocks
+
+    # Restore unmatched blocks at the end
+    result = list(optimized_blocks)
+    for block in unmatched:
+        result.append(block)
+
+    return result
+
+
+# =============================================================================
+# LOCKED CONTENT VALIDATION
+# =============================================================================
+# Some content should never be modified (legal, contact, compliance).
+
+
+LOCKED_CONTENT_PATTERNS = [
+    # Legal/compliance
+    r"©.*\d{4}",  # Copyright notices
+    r"all rights reserved",
+    r"privacy policy",
+    r"terms of service",
+    r"terms and conditions",
+
+    # Contact info
+    r"\d{3}[-.]?\d{3}[-.]?\d{4}",  # Phone numbers
+    r"\d+\s+[A-Z][a-z]+\s+(?:Street|St|Ave|Road|Rd|Dr|Blvd)",  # Addresses
+
+    # Compliance
+    r"FDA\s+(?:approved|cleared|registered)",
+    r"HIPAA\s+compliant",
+    r"ISO\s*\d+",
+    r"licensed and insured",
+]
+
+
+def extract_locked_content(text: str) -> list[str]:
+    """
+    Extract content that should never be modified.
+
+    Args:
+        text: Source text.
+
+    Returns:
+        List of locked content strings.
+    """
+    locked = []
+    for pattern in LOCKED_CONTENT_PATTERNS:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        locked.extend(matches)
+    return locked
+
+
+def validate_locked_content_preserved(
+    original: str,
+    optimized: str,
+) -> tuple[bool, list[str]]:
+    """
+    Validate that locked content is preserved in output.
+
+    Args:
+        original: Original content.
+        optimized: Optimized content.
+
+    Returns:
+        Tuple of (is_valid, missing_locked_content).
+    """
+    original_locked = extract_locked_content(original)
+    if not original_locked:
+        return True, []
+
+    missing = []
+    for locked_item in original_locked:
+        if locked_item.lower() not in optimized.lower():
+            missing.append(locked_item)
+
+    return len(missing) == 0, missing
+
+
 def validate_and_preserve(
     llm_output: str,
     original_content: str,
