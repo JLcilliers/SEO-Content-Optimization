@@ -9,8 +9,12 @@ import base64
 import io
 import os
 import tempfile
-from typing import Optional
+import zipfile
+from datetime import datetime
+from enum import Enum
+from typing import Optional, NamedTuple
 
+import pandas as pd
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
@@ -89,6 +93,301 @@ class HealthResponse(BaseModel):
     """Health check response."""
     status: str
     version: str
+
+
+# ============================================================================
+# Bulk Optimization Models and Helpers
+# ============================================================================
+
+class BulkOptimizationStatus(str, Enum):
+    """Status of individual optimization in bulk job."""
+    SUCCESS = "success"
+    FAILED = "failed"
+    PENDING = "pending"
+
+
+class BulkItemResult(BaseModel):
+    """Result for a single item in bulk optimization."""
+    row_number: int
+    url: str
+    primary_keyword: str
+    status: BulkOptimizationStatus
+    filename: Optional[str] = None
+    error_message: Optional[str] = None
+    secondary_keywords_used: list[str] = Field(default_factory=list)
+
+
+class BulkOptimizationRow(NamedTuple):
+    """Parsed row from bulk optimization Excel file."""
+    row_number: int  # 1-indexed for user clarity (Excel row number)
+    url: str
+    primary_keyword: str
+    secondary_keywords: list[str]
+
+
+class BulkExcelParseError(Exception):
+    """Raised when bulk Excel parsing fails."""
+    pass
+
+
+def _find_column_variant(df: pd.DataFrame, variants: list[str]) -> Optional[str]:
+    """Find a column matching one of the variants (case-insensitive)."""
+    normalized = {
+        col.lower().strip().replace(" ", "_").replace("-", "_"): col
+        for col in df.columns
+    }
+    for variant in variants:
+        key = variant.lower().replace(" ", "_").replace("-", "_")
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def parse_bulk_optimization_excel(file_path: Path) -> list[BulkOptimizationRow]:
+    """
+    Parse bulk optimization Excel file.
+
+    Expected columns:
+    - URL (required): The URL to optimize
+    - Primary Keyword (required): Main keyword for optimization
+    - Secondary Keywords (optional): Comma-separated secondary keywords
+
+    Args:
+        file_path: Path to the Excel file.
+
+    Returns:
+        List of parsed rows ready for optimization.
+
+    Raises:
+        BulkExcelParseError: If parsing fails or validation fails.
+    """
+    try:
+        df = pd.read_excel(file_path)
+    except Exception as e:
+        raise BulkExcelParseError(f"Failed to read Excel file: {e}")
+
+    if df.empty:
+        raise BulkExcelParseError("Excel file contains no data rows")
+
+    # Find columns using variant matching
+    url_col = _find_column_variant(df, ["url", "source_url", "page_url", "target_url"])
+    primary_col = _find_column_variant(df, ["primary_keyword", "primary", "main_keyword", "keyword"])
+    secondary_col = _find_column_variant(df, ["secondary_keywords", "secondary", "other_keywords", "additional_keywords"])
+
+    if not url_col:
+        raise BulkExcelParseError(
+            "Missing required column: URL. Expected one of: URL, Source URL, Page URL, Target URL"
+        )
+    if not primary_col:
+        raise BulkExcelParseError(
+            "Missing required column: Primary Keyword. Expected one of: Primary Keyword, Primary, Main Keyword, Keyword"
+        )
+
+    # Validate row count (max 10)
+    if len(df) > 10:
+        raise BulkExcelParseError(
+            f"Batch limit exceeded: {len(df)} URLs found, maximum is 10"
+        )
+
+    rows: list[BulkOptimizationRow] = []
+
+    for idx, row in df.iterrows():
+        row_num = idx + 2  # Excel row number (1-indexed header + data)
+
+        url = str(row[url_col]).strip() if pd.notna(row[url_col]) else ""
+        primary = str(row[primary_col]).strip() if pd.notna(row[primary_col]) else ""
+
+        # Validate URL
+        if not url:
+            raise BulkExcelParseError(f"Row {row_num}: URL is required")
+        if not url.startswith(("http://", "https://")):
+            raise BulkExcelParseError(
+                f"Row {row_num}: Invalid URL format '{url}'. Must start with http:// or https://"
+            )
+
+        # Validate primary keyword
+        if not primary:
+            raise BulkExcelParseError(f"Row {row_num}: Primary keyword is required")
+
+        # Parse secondary keywords (comma-separated)
+        secondary: list[str] = []
+        if secondary_col and pd.notna(row.get(secondary_col)):
+            raw_secondary = str(row[secondary_col])
+            secondary = [kw.strip() for kw in raw_secondary.split(",") if kw.strip()]
+
+        rows.append(BulkOptimizationRow(
+            row_number=row_num,
+            url=url,
+            primary_keyword=primary,
+            secondary_keywords=secondary[:5],  # Limit to 5 secondary keywords
+        ))
+
+    return rows
+
+
+def _ensure_unique_filename(filename: str, existing: list[str]) -> str:
+    """Ensure filename is unique by adding numeric suffix if needed."""
+    if filename not in existing:
+        return filename
+
+    base = filename.rsplit(".", 1)[0]
+    ext = ".docx"
+    counter = 1
+
+    while f"{base}-{counter}{ext}" in existing:
+        counter += 1
+
+    return f"{base}-{counter}{ext}"
+
+
+def _create_manifest(results: list[BulkItemResult]) -> str:
+    """Create a manifest text file summarizing the bulk operation."""
+    lines = [
+        "SEO Content Optimizer - Bulk Optimization Results",
+        "=" * 50,
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        f"Total URLs processed: {len(results)}",
+        f"Successful: {sum(1 for r in results if r.status == BulkOptimizationStatus.SUCCESS)}",
+        f"Failed: {sum(1 for r in results if r.status == BulkOptimizationStatus.FAILED)}",
+        "",
+        "Details:",
+        "-" * 50,
+    ]
+
+    for r in results:
+        status_icon = "[OK]" if r.status == BulkOptimizationStatus.SUCCESS else "[FAIL]"
+        lines.append(f"\nRow {r.row_number}: {status_icon}")
+        lines.append(f"  URL: {r.url}")
+        lines.append(f"  Primary Keyword: {r.primary_keyword}")
+        if r.secondary_keywords_used:
+            lines.append(f"  Secondary Keywords: {', '.join(r.secondary_keywords_used)}")
+        if r.filename:
+            lines.append(f"  Output File: {r.filename}")
+        if r.error_message:
+            lines.append(f"  Error: {r.error_message}")
+
+    return "\n".join(lines)
+
+
+async def process_bulk_optimization(
+    rows: list[BulkOptimizationRow],
+    api_key: str,
+    generate_faq: bool = True,
+    faq_count: int = 4,
+) -> tuple[io.BytesIO, list[BulkItemResult]]:
+    """
+    Process multiple URLs for optimization.
+
+    Stops on first error and returns partial results.
+
+    Args:
+        rows: Parsed Excel rows to process.
+        api_key: Anthropic API key.
+        generate_faq: Whether to generate FAQ sections.
+        faq_count: Number of FAQ items per document.
+
+    Returns:
+        Tuple of (ZIP file buffer, list of results).
+    """
+    results: list[BulkItemResult] = []
+    docx_files: list[tuple[str, bytes]] = []  # (filename, bytes)
+
+    optimizer = ContentOptimizer(api_key=api_key)
+
+    for row in rows:
+        try:
+            # Step 1: Fetch content from URL
+            content = fetch_url_content(row.url)
+
+            # Step 2: Build manual keywords config
+            manual_keywords_config = ManualKeywordsConfig(
+                primary=row.primary_keyword,
+                secondary=row.secondary_keywords,
+            )
+
+            # Step 3: Run optimization
+            result = optimizer.optimize(
+                content=content,
+                keywords=[],  # Empty - using manual_keywords
+                manual_keywords=manual_keywords_config,
+                generate_faq=generate_faq,
+                faq_count=faq_count,
+                max_secondary=len(row.secondary_keywords) if row.secondary_keywords else 5,
+            )
+
+            # Step 4: Generate DOCX
+            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+                output_path = Path(tmp.name)
+
+            # Extract H1 for filename
+            h1_heading = None
+            for me in result.meta_elements:
+                if me.element_name == "H1":
+                    h1_heading = me.optimized or me.current
+                    break
+
+            # Generate filename
+            filename = suggest_filename_for_download(
+                source=row.url,
+                h1_heading=h1_heading,
+            )
+
+            # Ensure unique filename in ZIP
+            filename = _ensure_unique_filename(filename, [f[0] for f in docx_files])
+
+            # Create document title
+            document_title = filename.replace(".docx", "").replace("-optimized-content", "")
+
+            writer = DocxWriter()
+            writer.write(
+                result,
+                output_path,
+                source_url=row.url,
+                document_title=f"{document_title} | Content Improvement",
+            )
+
+            # Read DOCX bytes
+            with open(output_path, "rb") as f:
+                docx_bytes = f.read()
+            output_path.unlink()
+
+            docx_files.append((filename, docx_bytes))
+
+            results.append(BulkItemResult(
+                row_number=row.row_number,
+                url=row.url,
+                primary_keyword=row.primary_keyword,
+                status=BulkOptimizationStatus.SUCCESS,
+                filename=filename,
+                secondary_keywords_used=result.secondary_keywords or [],
+            ))
+
+        except Exception as e:
+            # Stop on first error - include partial results
+            results.append(BulkItemResult(
+                row_number=row.row_number,
+                url=row.url,
+                primary_keyword=row.primary_keyword,
+                status=BulkOptimizationStatus.FAILED,
+                error_message=str(e),
+            ))
+            # Stop processing further rows
+            break
+
+    # Create ZIP file
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Add all DOCX files
+        for filename, docx_bytes in docx_files:
+            zf.writestr(filename, docx_bytes)
+
+        # Add manifest/summary file
+        manifest = _create_manifest(results)
+        zf.writestr("_manifest.txt", manifest)
+
+    zip_buffer.seek(0)
+    return zip_buffer, results
 
 
 # Path to public directory for static files
@@ -476,6 +775,97 @@ async def optimize_url_with_keywords_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/optimize/bulk")
+async def optimize_bulk(
+    file: UploadFile = File(..., description="Excel file with URLs and keywords"),
+    generate_faq: bool = Form(True),
+    faq_count: int = Form(4),
+):
+    """
+    Bulk optimize multiple URLs from an Excel file.
+
+    Excel format:
+    - Column 1: URL (required) - The URL to fetch and optimize
+    - Column 2: Primary Keyword (required) - Main keyword for optimization
+    - Column 3: Secondary Keywords (optional) - Comma-separated list
+
+    Maximum 10 URLs per batch. Processing stops on first error.
+
+    Returns a ZIP file containing:
+    - One optimized DOCX per successful URL
+    - _manifest.txt with processing summary
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="ANTHROPIC_API_KEY environment variable not set"
+        )
+
+    # Validate file was provided
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+
+    # Validate file type
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in (".xlsx", ".xls"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type: {suffix}. Expected .xlsx or .xls"
+        )
+
+    excel_path = None
+    try:
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            content_bytes = await file.read()
+            tmp.write(content_bytes)
+            excel_path = Path(tmp.name)
+
+        # Parse Excel file
+        try:
+            rows = parse_bulk_optimization_excel(excel_path)
+        except BulkExcelParseError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        # Process all rows
+        zip_buffer, results = await process_bulk_optimization(
+            rows=rows,
+            api_key=api_key,
+            generate_faq=generate_faq,
+            faq_count=faq_count,
+        )
+
+        # Calculate statistics
+        successful = sum(1 for r in results if r.status == BulkOptimizationStatus.SUCCESS)
+        failed = sum(1 for r in results if r.status == BulkOptimizationStatus.FAILED)
+
+        # Generate ZIP filename
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        zip_filename = f"optimized-content-batch-{timestamp}.zip"
+
+        # Return ZIP as streaming response
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{zip_filename}"',
+                "X-Bulk-Total": str(len(rows)),
+                "X-Bulk-Successful": str(successful),
+                "X-Bulk-Failed": str(failed),
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bulk optimization failed: {str(e)}")
+    finally:
+        # Clean up temp file
+        if excel_path and excel_path.exists():
+            excel_path.unlink()
+
+
 @app.get("/api/info")
 async def api_info():
     """Get API information and usage instructions."""
@@ -489,6 +879,7 @@ async def api_info():
             "POST /api/optimize/url": "Optimize content from URL with JSON keywords",
             "POST /api/optimize/url-with-keywords-file": "Optimize content from URL with keywords file",
             "POST /api/optimize/file": "Optimize uploaded Word document with keywords file",
+            "POST /api/optimize/bulk": "Bulk optimize multiple URLs from Excel file (max 10, returns ZIP)",
             "GET /api/info": "This endpoint",
         },
         "documentation": "/docs",
