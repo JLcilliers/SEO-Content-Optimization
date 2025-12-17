@@ -23,6 +23,7 @@ from docx.text.paragraph import Paragraph
 
 from .llm_client import ADD_END, ADD_START
 from .diff_markers import normalize_paragraph_spacing
+from .ai_addons import AIAddons, ChunkMap, Chunk
 from .models import (
     ContentBlock,
     ContentBlockType,
@@ -405,6 +406,7 @@ class DocxWriter:
         output_path: Union[str, Path],
         source_url: Optional[str] = None,
         document_title: Optional[str] = None,
+        ai_addons: Optional[AIAddons] = None,
     ) -> Path:
         """
         Write the optimization result to a Word document.
@@ -414,6 +416,7 @@ class DocxWriter:
             output_path: Path for the output .docx file.
             source_url: Optional source URL to display at top.
             document_title: Optional custom document title.
+            ai_addons: Optional AIAddons with Key Takeaways and Chunk Map.
 
         Returns:
             Path to the created document.
@@ -456,14 +459,49 @@ class DocxWriter:
         # Add optimized blocks
         self._add_optimized_blocks(result.optimized_blocks)
 
-        # Add FAQ section if present
+        # Add AI Optimization Add-ons section (Key Takeaways + Chunk Data)
+        if ai_addons:
+            self._add_ai_addons_section(ai_addons)
+
+        # Add warning if FAQ was generated despite inappropriate archetype
+        if result.faq_archetype_warning:
+            self._add_warning_text(result.faq_archetype_warning)
+
+        # Add FAQ section if present (always add if enabled - fail-closed)
         if result.faq_items:
             self._add_faq_section(result.faq_items)
+        elif ai_addons and ai_addons.faqs:
+            # Use FAQs from ai_addons as fallback
+            self._add_faq_section_from_dicts(ai_addons.faqs)
 
         # Save document
         self.doc.save(str(output_path))
 
         return output_path
+
+    def _add_faq_section_from_dicts(self, faq_dicts: list[dict]) -> None:
+        """Add FAQ section from dict format (question/answer keys)."""
+        # Add FAQ header
+        faq_header = self.doc.add_heading("Frequently Asked Questions", level=2)
+        for run in faq_header.runs:
+            run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
+
+        for faq in faq_dicts:
+            question = faq.get("question", "")
+            answer = faq.get("answer", "")
+
+            if not question or not answer:
+                continue
+
+            # Question as bold paragraph (all green)
+            q_para = self.doc.add_paragraph()
+            add_marked_text(q_para, f"{MARK_START}{question}{MARK_END}")
+            for run in q_para.runs:
+                run.font.bold = True
+
+            # Answer as paragraph (all green)
+            a_para = self.doc.add_paragraph()
+            add_marked_text(a_para, f"{MARK_START}{answer}{MARK_END}")
 
     def _add_reading_guide(self) -> None:
         """Add the reading guide section at the top."""
@@ -745,6 +783,147 @@ class DocxWriter:
             return stripped[match.end():].strip()
 
         return stripped
+
+    def _add_ai_addons_section(self, ai_addons: AIAddons) -> None:
+        """
+        Add the AI Optimization Add-ons section.
+
+        This section is entirely green-highlighted as it's all new content.
+        Includes:
+        - Key Takeaways (3-6 bullets)
+        - Chunk Data table (for AI retrieval)
+
+        Args:
+            ai_addons: AIAddons object with generated content.
+        """
+        if not ai_addons:
+            return
+
+        # Add main section header (green)
+        section_header = self.doc.add_heading("AI Optimization Add-ons", level=2)
+        for run in section_header.runs:
+            run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
+
+        # Add Key Takeaways
+        if ai_addons.key_takeaways:
+            self._add_key_takeaways(ai_addons.key_takeaways)
+
+        # Add Chunk Data table
+        if ai_addons.chunk_map and ai_addons.chunk_map.chunks:
+            self._add_chunk_map_table(ai_addons.chunk_map)
+
+    def _add_key_takeaways(self, takeaways: list[str]) -> None:
+        """
+        Add the Key Takeaways section.
+
+        Args:
+            takeaways: List of takeaway strings.
+        """
+        # Add subheading (green)
+        subheader = self.doc.add_heading("Key Takeaways", level=3)
+        for run in subheader.runs:
+            run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
+
+        # Add bullets (all green)
+        for takeaway in takeaways:
+            para = self.doc.add_paragraph(style="List Bullet")
+            # Wrap in markers so it's highlighted
+            marked_text = f"{MARK_START}{takeaway}{MARK_END}"
+            add_marked_text(para, marked_text)
+
+        # Add spacing
+        self.doc.add_paragraph()
+
+    def _add_chunk_map_table(self, chunk_map: ChunkMap) -> None:
+        """
+        Add the Chunk Data table.
+
+        Args:
+            chunk_map: ChunkMap with chunk metadata.
+        """
+        # Add subheading (green)
+        subheader = self.doc.add_heading("Chunk Data", level=3)
+        for run in subheader.runs:
+            run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
+
+        # Add summary stats
+        stats_para = self.doc.add_paragraph()
+        stats_text = (
+            f"{MARK_START}Total Chunks: {chunk_map.total_chunks} | "
+            f"Total Words: {chunk_map.total_words} | "
+            f"Est. Tokens: {chunk_map.total_tokens}{MARK_END}"
+        )
+        add_marked_text(stats_para, stats_text)
+
+        # Create table with columns: ID, Section, Summary, Best Question, Keywords
+        table = self.doc.add_table(rows=1, cols=5)
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.LEFT
+
+        # Set column widths
+        widths = [Inches(0.5), Inches(1.2), Inches(2.5), Inches(2.0), Inches(1.3)]
+        for i, width in enumerate(widths):
+            table.columns[i].width = width
+
+        # Add header row
+        header_cells = table.rows[0].cells
+        headers = ["ID", "Section", "Summary", "Best Question", "Keywords"]
+        for i, header in enumerate(headers):
+            header_cells[i].text = ""
+            para = header_cells[i].paragraphs[0]
+            run = para.add_run(header)
+            run.font.bold = True
+            run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
+            set_cell_shading(header_cells[i], "D9D9D9")
+
+        # Add chunk rows (all green)
+        for chunk in chunk_map.chunks:
+            row = table.add_row()
+            cells = row.cells
+
+            # Chunk ID
+            cells[0].text = ""
+            add_marked_text(cells[0].paragraphs[0], f"{MARK_START}{chunk.chunk_id}{MARK_END}")
+
+            # Section/Heading path
+            cells[1].text = ""
+            heading_text = chunk.heading_path[:50] + "..." if len(chunk.heading_path) > 50 else chunk.heading_path
+            add_marked_text(cells[1].paragraphs[0], f"{MARK_START}{heading_text}{MARK_END}")
+
+            # Summary
+            cells[2].text = ""
+            summary = chunk.summary[:150] + "..." if len(chunk.summary) > 150 else chunk.summary
+            add_marked_text(cells[2].paragraphs[0], f"{MARK_START}{summary}{MARK_END}")
+
+            # Best Question
+            cells[3].text = ""
+            add_marked_text(cells[3].paragraphs[0], f"{MARK_START}{chunk.best_question}{MARK_END}")
+
+            # Keywords
+            cells[4].text = ""
+            keywords = ", ".join(chunk.keywords_present[:3]) if chunk.keywords_present else "None"
+            add_marked_text(cells[4].paragraphs[0], f"{MARK_START}{keywords}{MARK_END}")
+
+        # Add spacing
+        self.doc.add_paragraph()
+
+    def _add_warning_text(self, warning: str) -> None:
+        """
+        Add a warning message in red text.
+
+        This is used to display warnings about potentially inappropriate
+        content generation (e.g., FAQ generated for homepage archetype).
+
+        Args:
+            warning: The warning message to display.
+        """
+        from docx.shared import RGBColor
+
+        warning_para = self.doc.add_paragraph()
+        run = warning_para.add_run(f"WARNING: {warning}")
+        run.font.color.rgb = RGBColor(255, 0, 0)  # Red
+        run.font.bold = True
+        run.font.name = "Poppins"
 
     def _add_faq_section(self, faq_items: list[FAQItem]) -> None:
         """Add the FAQ section."""

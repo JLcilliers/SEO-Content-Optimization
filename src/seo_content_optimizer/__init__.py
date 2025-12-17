@@ -10,6 +10,8 @@ A fully automated SEO content optimization tool that:
 __version__ = "1.0.0"
 __author__ = "SEO Content Optimizer Team"
 
+from .config import OptimizationConfig
+
 from .models import (
     Keyword,
     PageMeta,
@@ -96,6 +98,8 @@ from .repetition_guard import (
 )
 
 __all__ = [
+    # Configuration
+    "OptimizationConfig",
     # Legacy models
     "Keyword",
     "PageMeta",

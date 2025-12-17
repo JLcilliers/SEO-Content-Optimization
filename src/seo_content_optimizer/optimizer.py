@@ -60,6 +60,7 @@ from .diff_markers import (
     preprocess_keywords_for_diff,  # Keyword atomic units: preprocess for diff
     postprocess_keywords_from_diff,  # Keyword atomic units: postprocess after diff
 )
+from .config import OptimizationConfig
 from .models import (
     ContentAudit,
     DocxContent,
@@ -360,6 +361,7 @@ class ContentOptimizer:
         generate_faq: bool = True,
         faq_count: int = 4,
         max_secondary: int = 5,
+        config: Optional[OptimizationConfig] = None,
     ) -> OptimizationResult:
         """
         Perform full SEO optimization on content.
@@ -370,9 +372,11 @@ class ContentOptimizer:
             manual_keywords: Manual keyword selection config. If provided, bypasses
                             automatic keyword selection and uses user-specified keywords
                             directly without filtering or scoring.
-            generate_faq: Whether to generate FAQ section.
-            faq_count: Number of FAQ items to generate.
+            generate_faq: Whether to generate FAQ section (DEPRECATED: use config.faq_policy).
+            faq_count: Number of FAQ items to generate (DEPRECATED: use config.faq_count).
             max_secondary: Maximum secondary keywords.
+            config: Centralized optimization configuration. When provided, overrides
+                   generate_faq and faq_count parameters.
 
         Returns:
             OptimizationResult with all optimized content.
@@ -584,19 +588,51 @@ class ContentOptimizer:
 
         # Step 6: Generate FAQ if requested (Part 10 of 10-Part Framework)
         # Uses optimization plan's faq_keywords for targeted keyword integration
-        # ARCHETYPE CHECK: Only generate FAQ if archetype supports it
+        # POLICY-BASED FAQ CONTROL: auto/always/never
         faq_items = []
-        should_generate_faq = generate_faq and self._page_archetype.should_add_faq
-        if not should_generate_faq and generate_faq:
-            print(f"DEBUG: FAQ generation SKIPPED - archetype '{self._page_archetype.archetype}' "
-                  "does not recommend FAQ", file=sys.stderr)
-        if should_generate_faq:
-            faq_items = self._generate_faq(
+        faq_archetype_warning = None
+
+        # Build effective config from legacy params or provided config
+        effective_config = config or OptimizationConfig(
+            faq_policy="auto" if generate_faq else "never",
+            faq_count=faq_count,
+        )
+
+        # Determine if archetype recommends FAQ
+        archetype_recommends_faq = self._page_archetype.should_add_faq
+
+        if effective_config.faq_policy == "never":
+            # Never generate FAQ
+            print("DEBUG: FAQ generation DISABLED (policy=never)", file=sys.stderr)
+        elif effective_config.faq_policy == "always":
+            # Always generate FAQ, but warn if archetype is inappropriate
+            if not archetype_recommends_faq:
+                faq_archetype_warning = (
+                    f"FAQ generated despite '{self._page_archetype.archetype}' page type "
+                    f"(policy=always). Consider reviewing FAQ appropriateness for this page."
+                )
+                print(f"WARNING: {faq_archetype_warning}", file=sys.stderr)
+
+            faq_items = self._generate_faq_with_fallback(
                 topic=analysis.topic,
                 keyword_plan=keyword_plan,
                 optimization_plan=optimization_plan,
-                num_items=faq_count,
+                num_items=effective_config.faq_count,
+                min_valid=effective_config.faq_min_valid,
             )
+        elif effective_config.faq_policy == "auto":
+            # Auto mode: only generate if archetype recommends
+            if archetype_recommends_faq:
+                faq_items = self._generate_faq_with_fallback(
+                    topic=analysis.topic,
+                    keyword_plan=keyword_plan,
+                    optimization_plan=optimization_plan,
+                    num_items=effective_config.faq_count,
+                    min_valid=effective_config.faq_min_valid,
+                )
+            else:
+                print(f"DEBUG: FAQ generation SKIPPED - archetype '{self._page_archetype.archetype}' "
+                      "does not recommend FAQ (policy=auto)", file=sys.stderr)
 
         # Step 7: GUARANTEE all keywords appear in content (especially for manual mode)
         # Check which keywords are missing from the body content
@@ -699,6 +735,11 @@ class ContentOptimizer:
         # Convert to legacy format for backward compatibility
         keyword_usage_counts = self._get_legacy_keyword_counts(scoped_keyword_counts)
 
+        # Build warnings list
+        warnings = []
+        if faq_archetype_warning:
+            warnings.append(faq_archetype_warning)
+
         return OptimizationResult(
             meta_elements=meta_elements,
             optimized_blocks=optimized_blocks,
@@ -706,6 +747,8 @@ class ContentOptimizer:
             primary_keyword=keyword_plan.primary.phrase,
             secondary_keywords=[kw.phrase for kw in keyword_plan.secondary],
             keyword_usage_counts=keyword_usage_counts,
+            warnings=warnings,
+            faq_archetype_warning=faq_archetype_warning,
         )
 
     def _build_keyword_plan_from_manual(
@@ -2757,6 +2800,113 @@ Professional {keyword} solutions provide reliable security for businesses of all
             )
             for item in valid_faqs
         ]
+
+    def _generate_faq_with_fallback(
+        self,
+        topic: str,
+        keyword_plan: KeywordPlan,
+        optimization_plan: OptimizationPlan,
+        num_items: int,
+        min_valid: int = 2,
+    ) -> list[FAQItem]:
+        """
+        Generate FAQ with fail-closed behavior.
+
+        This method implements a robust FAQ generation strategy:
+        1. Try LLM generation
+        2. If < min_valid items returned, retry once
+        3. If still insufficient, use deterministic fallback
+        4. If enabled but empty = pipeline error (raise)
+
+        Args:
+            topic: Content topic.
+            keyword_plan: The keyword plan.
+            optimization_plan: Optimization plan with faq_keywords.
+            num_items: Target FAQ count.
+            min_valid: Minimum valid FAQs required (default: 2).
+
+        Returns:
+            List of FAQItem objects (never empty if called).
+
+        Raises:
+            RuntimeError: If FAQ generation completely fails after all fallbacks.
+        """
+        import sys
+
+        # First attempt
+        faq_items = self._generate_faq(
+            topic=topic,
+            keyword_plan=keyword_plan,
+            optimization_plan=optimization_plan,
+            num_items=num_items,
+        )
+
+        # Check if sufficient
+        if len(faq_items) >= min_valid:
+            return faq_items
+
+        # Retry once
+        print(f"DEBUG: FAQ insufficient ({len(faq_items)}/{min_valid}), retrying...",
+              file=sys.stderr)
+        faq_items = self._generate_faq(
+            topic=topic,
+            keyword_plan=keyword_plan,
+            optimization_plan=optimization_plan,
+            num_items=num_items,
+        )
+
+        if len(faq_items) >= min_valid:
+            return faq_items
+
+        # Fall back to deterministic generation
+        print(f"DEBUG: FAQ still insufficient after retry ({len(faq_items)}/{min_valid}), "
+              "using fallback", file=sys.stderr)
+
+        from .ai_addons import generate_fallback_faqs
+
+        # Get original content blocks for fallback generation
+        original_blocks = getattr(self, '_original_blocks', [])
+        content_block_texts = [b.text for b in original_blocks] if original_blocks else []
+
+        brand_context = getattr(self, '_brand_context', None)
+        brand_name = brand_context.get("name") if brand_context else None
+
+        fallback_faqs = generate_fallback_faqs(
+            content_blocks=content_block_texts,
+            primary_keyword=keyword_plan.primary.phrase,
+            secondary_keywords=[kw.phrase for kw in keyword_plan.secondary],
+            brand_name=brand_name,
+            min_faqs=min_valid,
+            max_faqs=num_items,
+        )
+
+        # Convert fallback to FAQItem with markers
+        fallback_items = [
+            FAQItem(
+                question=mark_block_as_new(faq["question"]),
+                answer=mark_block_as_new(faq["answer"])
+            )
+            for faq in fallback_faqs
+        ]
+
+        # Merge any LLM-generated items with fallback items
+        # (prefer LLM items if we have some)
+        if faq_items:
+            # Use LLM items first, then fill with fallback
+            merged = list(faq_items)
+            for fb_item in fallback_items:
+                if len(merged) >= num_items:
+                    break
+                merged.append(fb_item)
+            return merged
+
+        if not fallback_items:
+            raise RuntimeError(
+                f"FAQ generation failed: both LLM and fallback produced no results. "
+                f"Topic: {topic}, Primary keyword: {keyword_plan.primary.phrase}"
+            )
+
+        return fallback_items
 
     def _explain_title_change(
         self,

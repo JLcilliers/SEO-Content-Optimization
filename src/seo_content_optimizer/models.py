@@ -300,6 +300,12 @@ class OptimizationResult:
     # Keyword usage counts (phrase -> count in final output)
     keyword_usage_counts: dict[str, int] = field(default_factory=dict)
 
+    # Warnings generated during optimization
+    warnings: list[str] = field(default_factory=list)
+
+    # Track if FAQ was generated despite inappropriate archetype
+    faq_archetype_warning: Optional[str] = None
+
     @property
     def title_tag(self) -> Optional[MetaElement]:
         """Get the title tag meta element."""
