@@ -1170,8 +1170,9 @@ class ContentOptimizer:
                     )
                 else:
                     # Keep very short paragraphs as-is but track any keywords present
+                    block_text_lower = block.text.lower()
                     for kw in [primary] + secondary:
-                        if kw.lower() in text_lower:
+                        if kw.lower() in block_text_lower:
                             keywords_placed_in_body.add(kw.lower())
                     optimized_blocks.append(block)
 
