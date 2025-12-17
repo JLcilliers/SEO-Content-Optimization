@@ -183,6 +183,8 @@ def normalize_whitespace(text: str) -> str:
     - Non-breaking spaces -> regular spaces
     - Missing spaces after periods (word.Word -> word. Word)
     - Tab/newline normalization
+    - U+2028 LINE SEPARATOR -> newline (common mojibake source)
+    - U+2029 PARAGRAPH SEPARATOR -> double newline
 
     Args:
         text: Text to normalize.
@@ -195,6 +197,12 @@ def normalize_whitespace(text: str) -> str:
 
     result = text
 
+    # CRITICAL: Normalize Unicode line/paragraph separators FIRST
+    # U+2028 LINE SEPARATOR causes "â¨" artifacts when mis-decoded
+    # U+2029 PARAGRAPH SEPARATOR can also cause issues
+    result = result.replace('\u2028', '\n')   # Line separator -> newline
+    result = result.replace('\u2029', '\n\n') # Paragraph separator -> double newline
+
     # Convert non-breaking spaces and other space variants
     result = result.replace('\u00a0', ' ')  # Non-breaking space
     result = result.replace('\u2002', ' ')  # En space
@@ -204,6 +212,11 @@ def normalize_whitespace(text: str) -> str:
     result = result.replace('\u200b', '')   # Zero-width space (remove)
     result = result.replace('\ufeff', '')   # BOM (remove)
 
+    # Remove other problematic Unicode characters
+    result = result.replace('\u200c', '')   # Zero-width non-joiner
+    result = result.replace('\u200d', '')   # Zero-width joiner
+    result = result.replace('\u2060', '')   # Word joiner
+
     # Normalize tabs and newlines for inline text
     result = result.replace('\t', ' ')
     result = result.replace('\r\n', '\n')
@@ -212,9 +225,11 @@ def normalize_whitespace(text: str) -> str:
     # Fix missing space after punctuation: "word.Word" -> "word. Word"
     result = re.sub(r'([.!?])([A-Z])', r'\1 \2', result)
 
-    # Collapse multiple spaces
-    result = re.sub(r' +', ' ', result)
+    # Collapse multiple spaces (but preserve single spaces!)
+    result = re.sub(r'  +', ' ', result)
 
+    # IMPORTANT: Only strip if the entire string, not boundaries
+    # This preserves whitespace needed for word separation
     return result.strip()
 
 

@@ -74,6 +74,84 @@ MIN_BLOCK_COUNT = 3   # Minimum content blocks
 MIN_HEADING_COUNT = 1  # At least one heading expected
 
 
+def _decode_html_safely(response) -> str:
+    """
+    Decode HTTP response to string with proper encoding detection.
+
+    CRITICAL: This prevents mojibake by ensuring correct encoding.
+
+    Detection order:
+    1. Content-Type header charset
+    2. HTML meta charset tag
+    3. charset_normalizer detection (if available)
+    4. UTF-8 with error handling
+
+    Args:
+        response: requests.Response object
+
+    Returns:
+        Decoded HTML string
+    """
+    import sys
+
+    content_bytes = response.content
+
+    # 1. Try Content-Type header charset
+    content_type = response.headers.get('Content-Type', '')
+    if 'charset=' in content_type.lower():
+        charset = content_type.split('charset=')[-1].split(';')[0].strip().strip('"\'')
+        try:
+            return content_bytes.decode(charset)
+        except (UnicodeDecodeError, LookupError) as e:
+            print(f"DEBUG: Header charset {charset} failed: {e}", file=sys.stderr)
+
+    # 2. Try to find meta charset in first 8KB
+    head_bytes = content_bytes[:8192]
+    try:
+        head_text = head_bytes.decode('ascii', errors='ignore')
+
+        # Look for <meta charset="...">
+        import re
+        charset_match = re.search(r'<meta[^>]+charset=["\']?([^"\'>\s]+)', head_text, re.I)
+        if charset_match:
+            charset = charset_match.group(1)
+            try:
+                return content_bytes.decode(charset)
+            except (UnicodeDecodeError, LookupError) as e:
+                print(f"DEBUG: Meta charset {charset} failed: {e}", file=sys.stderr)
+
+        # Look for <meta http-equiv="Content-Type" content="...charset=...">
+        content_type_match = re.search(
+            r'<meta[^>]+http-equiv=["\']?Content-Type["\']?[^>]+content=["\']?[^"\']*charset=([^"\'>\s;]+)',
+            head_text, re.I
+        )
+        if content_type_match:
+            charset = content_type_match.group(1)
+            try:
+                return content_bytes.decode(charset)
+            except (UnicodeDecodeError, LookupError) as e:
+                print(f"DEBUG: Meta Content-Type charset {charset} failed: {e}", file=sys.stderr)
+    except Exception:
+        pass
+
+    # 3. Try charset_normalizer for smart detection
+    try:
+        from charset_normalizer import from_bytes
+        result = from_bytes(content_bytes).best()
+        if result:
+            print(f"DEBUG: charset_normalizer detected: {result.encoding}", file=sys.stderr)
+            return str(result)
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"DEBUG: charset_normalizer failed: {e}", file=sys.stderr)
+
+    # 4. Fall back to UTF-8 with replacement (never ignore errors!)
+    # Using 'replace' instead of 'ignore' to make encoding issues visible
+    print(f"DEBUG: Falling back to UTF-8 decode", file=sys.stderr)
+    return content_bytes.decode('utf-8', errors='replace')
+
+
 def _trafilatura_extraction_ladder(html: str, soup: BeautifulSoup) -> tuple[list[str], str]:
     """
     Multi-stage trafilatura extraction with automatic fallbacks.
@@ -260,28 +338,34 @@ def fetch_url_content(
     except requests.RequestException as e:
         raise ContentExtractionError(f"Failed to fetch URL: {e}")
 
-    html = response.text
+    # CRITICAL: Proper encoding detection to prevent mojibake
+    # Do NOT rely on response.text which can use wrong encoding
+    html = _decode_html_safely(response)
 
     # Parse HTML with BeautifulSoup for meta extraction
     soup = BeautifulSoup(html, "lxml")
 
-    # Extract title
+    # Extract title - use separator to preserve spaces between nested elements
     title = None
     title_tag = soup.find("title")
     if title_tag:
-        title = title_tag.get_text(strip=True)
+        title = title_tag.get_text(separator=" ", strip=True)
+        title = " ".join(title.split())  # Normalize whitespace
 
     # Extract meta description
     meta_description = None
     meta_desc_tag = soup.find("meta", attrs={"name": "description"})
     if meta_desc_tag and meta_desc_tag.get("content"):
         meta_description = meta_desc_tag["content"].strip()
+        meta_description = " ".join(meta_description.split())  # Normalize whitespace
 
-    # Extract H1
+    # Extract H1 - use separator to preserve spaces between nested elements
+    # This prevents "Park Ave" + "premium" becoming "Park Avepremium"
     h1 = None
     h1_tag = soup.find("h1")
     if h1_tag:
-        h1 = h1_tag.get_text(strip=True)
+        h1 = h1_tag.get_text(separator=" ", strip=True)
+        h1 = " ".join(h1.split())  # Normalize whitespace
 
     # Extract main content using EXTRACTION LADDER approach
     # This ensures maximum content recall with multiple fallback strategies

@@ -118,6 +118,10 @@ def strip_leaked_markers(text: str) -> str:
     """
     Remove any leaked markers from text as a safety net.
 
+    CRITICAL: This function must NOT strip boundary whitespace!
+    Stripping causes word concatenation bugs like "Avepremium"
+    when markers are between words.
+
     This should only catch edge cases where markers weren't
     properly processed. The main processing should handle markers
     correctly, but this provides a backup.
@@ -126,14 +130,14 @@ def strip_leaked_markers(text: str) -> str:
         text: Text that may contain leaked markers.
 
     Returns:
-        Cleaned text with markers removed.
+        Cleaned text with markers removed (whitespace preserved).
     """
     if not text:
         return text
 
     result = text
 
-    # Remove known marker patterns
+    # Remove known marker patterns (preserve surrounding whitespace!)
     result = result.replace(MARK_START, "")
     result = result.replace(MARK_END, "")
 
@@ -141,10 +145,14 @@ def strip_leaked_markers(text: str) -> str:
     for pattern in MARKER_LEAK_PATTERNS:
         result = re.sub(pattern, "", result, flags=re.IGNORECASE)
 
-    # Clean up resulting double spaces
-    result = re.sub(r" +", " ", result)
+    # Clean up resulting double/triple spaces -> single space
+    # But do NOT strip leading/trailing - that causes boundary bugs!
+    result = re.sub(r"  +", " ", result)
 
-    return result.strip()
+    # IMPORTANT: Do NOT call .strip() here!
+    # Stripping removes boundary whitespace and causes word concatenation
+    # like "in green" becoming "ingreen" or "Ave premium" -> "Avepremium"
+    return result
 
 
 def set_cell_shading(cell, color: str) -> None:
