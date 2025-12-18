@@ -282,6 +282,54 @@ class FAQItem:
 
 
 @dataclass
+class KeywordUsageDetail:
+    """
+    Detailed keyword usage counts distinguishing existing vs added occurrences.
+
+    This is critical for insert-only mode where we need to show:
+    - How many times the keyword already existed in source
+    - How many NEW occurrences were added by optimization
+
+    Example: If source had "AI hearing aids" twice and we added once more,
+    existing=2, added=1, total=3
+    """
+    keyword: str
+    is_primary: bool = False
+
+    # Counts by location in final output
+    meta: int = 0       # Meta title + description
+    headings: int = 0   # H1-H6 headings
+    body: int = 0       # Body paragraphs
+    faq: int = 0        # FAQ section
+
+    # Existing counts from source (before optimization)
+    existing_meta: int = 0
+    existing_headings: int = 0
+    existing_body: int = 0
+    existing_faq: int = 0
+
+    @property
+    def total(self) -> int:
+        """Total occurrences in final output."""
+        return self.meta + self.headings + self.body + self.faq
+
+    @property
+    def existing_total(self) -> int:
+        """Total occurrences that existed before optimization."""
+        return self.existing_meta + self.existing_headings + self.existing_body + self.existing_faq
+
+    @property
+    def added_total(self) -> int:
+        """Total NEW occurrences added by optimization."""
+        return max(0, self.total - self.existing_total)
+
+    @property
+    def added_body(self) -> int:
+        """NEW body occurrences added by optimization."""
+        return max(0, self.body - self.existing_body)
+
+
+@dataclass
 class OptimizationResult:
     """Complete result of content optimization."""
     # Meta elements
@@ -298,13 +346,67 @@ class OptimizationResult:
     secondary_keywords: list[str] = field(default_factory=list)
 
     # Keyword usage counts (phrase -> count in final output)
+    # Legacy format for backward compatibility
     keyword_usage_counts: dict[str, int] = field(default_factory=dict)
+
+    # Detailed keyword usage with existing vs added breakdown
+    # Maps keyword phrase to KeywordUsageDetail
+    keyword_usage_detailed: dict[str, "KeywordUsageDetail"] = field(default_factory=dict)
 
     # Warnings generated during optimization
     warnings: list[str] = field(default_factory=list)
 
     # Track if FAQ was generated despite inappropriate archetype
     faq_archetype_warning: Optional[str] = None
+
+    # AI Optimization Add-ons (Key Takeaways, Chunk Map)
+    # These are stored here for inclusion in the final DOCX output
+    ai_addons: Optional["AIAddonsResult"] = None
+
+    # Debug bundle for insert-only mode troubleshooting
+    # Only populated when include_debug=True is passed to optimizer
+    debug_bundle: Optional[dict] = None
+
+
+@dataclass
+class AIAddonsResult:
+    """
+    AI Optimization Add-ons result container.
+
+    Contains:
+    - Key Takeaways: 3-6 bullet points summarizing the content
+    - Chunk Map: Structured content chunks for AI/RAG retrieval
+    - FAQs: Fallback FAQ items if LLM generation fails
+    """
+    key_takeaways: list[str] = field(default_factory=list)
+    chunk_map_chunks: list["ChunkData"] = field(default_factory=list)
+    chunk_map_stats: Optional["ChunkMapStats"] = None
+    faqs: list[dict] = field(default_factory=list)  # [{"question": ..., "answer": ...}]
+
+
+@dataclass
+class ChunkData:
+    """
+    A single chunk in the Chunk Map.
+
+    Represents a semantically meaningful section of content
+    optimized for AI retrieval systems.
+    """
+    chunk_id: str
+    heading_context: str
+    summary: str
+    best_question: str
+    keywords_present: list[str] = field(default_factory=list)
+    word_count: int = 0
+    token_estimate: int = 0
+
+
+@dataclass
+class ChunkMapStats:
+    """Statistics for the Chunk Map."""
+    total_chunks: int = 0
+    total_words: int = 0
+    total_tokens: int = 0
 
     @property
     def title_tag(self) -> Optional[MetaElement]:

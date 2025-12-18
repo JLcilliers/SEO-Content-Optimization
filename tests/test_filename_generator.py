@@ -212,3 +212,21 @@ class TestSuggestFilenameForDownload:
             h1_heading="How to: Use SEO & Improve Rankings!",
         )
         assert result == "how-to-use-seo-improve-rankings-optimized-content.docx"
+
+    def test_h1_with_markers_produces_clean_filename(self):
+        """Test that H1 with [[[ADD]]] markers is properly slugified.
+
+        Note: Markers should be stripped BEFORE passing to this function.
+        This test verifies the slugify function handles any remaining
+        brackets by removing them (they become empty after removing non-alpha chars).
+        """
+        # If markers aren't stripped beforehand, slugify removes brackets but leaves 'add'/'endadd'
+        # API should strip markers first, but even if not, filename won't have brackets
+        result = suggest_filename_for_download(
+            "https://example.com/upload",
+            h1_heading="Best [[[ADD]]]SEO Tips[[[ENDADD]]] for 2025",
+        )
+        # After slugify, brackets are removed, 'add' and 'endadd' become part of slug
+        # This is why markers MUST be stripped BEFORE calling this function
+        assert "[[[" not in result
+        assert "]]]" not in result

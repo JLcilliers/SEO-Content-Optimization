@@ -121,6 +121,7 @@ class LLMClient:
         max_tokens: int = 4096,
         content_topics: list[str] = None,
         brand_context: dict = None,
+        optimization_mode: str = "enhanced",
     ) -> str:
         """
         Rewrite content with SEO optimization, marking all changes.
@@ -133,12 +134,14 @@ class LLMClient:
             max_tokens: Maximum tokens in response.
             content_topics: List of main topics from original content (for constraints).
             brand_context: Dict with brand name and mention limits.
+            optimization_mode: "minimal" for insert-only or "enhanced" for density mode.
 
         Returns:
             Optimized content with [[[ADD]]]...[[[ENDADD]]] markers.
         """
         user_prompt = self._build_rewrite_prompt(
-            content, primary_keyword, secondary_keywords, context, content_topics, brand_context
+            content, primary_keyword, secondary_keywords, context, content_topics, brand_context,
+            optimization_mode=optimization_mode
         )
 
         try:
@@ -511,8 +514,14 @@ RECOMMENDED: <comma-separated list of recommended keywords>"""
         context: str,
         content_topics: list[str] = None,
         brand_context: dict = None,
+        optimization_mode: str = "enhanced",
     ) -> str:
-        """Build the rewrite prompt for content optimization."""
+        """Build the rewrite prompt for content optimization.
+
+        Args:
+            optimization_mode: "minimal" for insert-only (each keyword max once)
+                              "enhanced" for density-based distribution
+        """
         secondary_list = ", ".join(secondary_keywords) if secondary_keywords else "None"
 
         # Build topic constraint
@@ -538,7 +547,48 @@ BRAND NAME CONTROL (STRICT):
 - If adding the brand name would sound unnatural, DO NOT add it
 """
 
-        return f"""Optimize the following content for SEO following the 10-Part SEO Framework.
+        # BUILD MODE-SPECIFIC INSTRUCTIONS
+        if optimization_mode == "minimal":
+            # INSERT-ONLY MODE: Minimal changes, each keyword at most once
+            return f"""Perform MINIMAL SEO optimization on the following content.
+
+PRIMARY KEYWORD: {primary_keyword}
+SECONDARY KEYWORDS: {secondary_list}
+
+ADDITIONAL CONTEXT: {context or "None provided"}
+{topic_constraint}{brand_instruction}
+ORIGINAL CONTENT:
+{content}
+
+INSERT-ONLY MODE INSTRUCTIONS (CRITICAL):
+This is INSERT-ONLY mode. Make MINIMAL changes to the content.
+
+STRICT RULES:
+1. Add each keyword AT MOST ONCE in the entire paragraph
+2. If a keyword already exists in the original content, DO NOT add it again
+3. Make the smallest possible change to include missing keywords
+4. Prefer adding a short phrase rather than rewriting sentences
+5. Preserve 95%+ of the original text unchanged
+6. DO NOT distribute keywords - one occurrence per keyword is the MAXIMUM
+7. DO NOT expand or lengthen the content beyond what's needed for keyword insertion
+
+KEYWORD INSERTION PRIORITY:
+- Only insert keywords that are completely missing from the original
+- Insert at the most natural location (near a related concept)
+- Use the EXACT phrase - never split keywords
+
+ABSOLUTE RESTRICTIONS:
+- ONLY use keywords from the EXACT list provided above
+- NEVER add multiple occurrences of the same keyword
+- NEVER introduce industries or topics not in the original
+- Keep the paragraph structure exactly the same
+- If a keyword doesn't fit naturally, SKIP IT - do not force it
+
+Return ONLY the optimized content as plain text. No markers, no explanations."""
+
+        else:
+            # ENHANCED MODE: Full density-based optimization (original behavior)
+            return f"""Optimize the following content for SEO following the 10-Part SEO Framework.
 
 PRIMARY KEYWORD (MUST appear in first ~100 words - Tier 3): {primary_keyword}
 

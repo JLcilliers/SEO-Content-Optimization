@@ -32,6 +32,8 @@ from seo_content_optimizer.optimizer import ContentOptimizer
 from seo_content_optimizer.docx_writer import DocxWriter
 from seo_content_optimizer.filename_generator import suggest_filename_for_download
 from seo_content_optimizer.models import Keyword, ManualKeywordsConfig
+from seo_content_optimizer.config import OptimizationConfig
+from seo_content_optimizer.diff_markers import strip_markers
 
 app = FastAPI(
     title="SEO Content Optimizer API",
@@ -67,14 +69,26 @@ class ManualKeywordsInput(BaseModel):
     secondary: list[str] = Field(default_factory=list, description="Up to 3 secondary keyword phrases")
 
 
+class OptimizationModeEnum(str, Enum):
+    """Optimization mode selection."""
+    insert_only = "insert_only"  # Strictest: no LLM rewrites, deterministic injection only
+    minimal = "minimal"  # Insert-only with minimal LLM assistance
+    enhanced = "enhanced"  # Full optimization: density targeting, distribution
+
+
 class OptimizeURLRequest(BaseModel):
     """Request model for URL-based optimization."""
     source_url: str = Field(..., description="URL to fetch content from")
     keywords: list[KeywordInput] = Field(default_factory=list, description="List of keywords to optimize for")
     manual_keywords: Optional[ManualKeywordsInput] = Field(None, description="Manual keyword selection (bypasses auto-selection)")
+    optimization_mode: Optional[OptimizationModeEnum] = Field(
+        None,
+        description="Optimization mode: 'minimal' (insert-only, each keyword once) or 'enhanced' (full density targeting). Defaults to 'minimal' when manual_keywords provided, 'enhanced' otherwise."
+    )
     generate_faq: bool = Field(True, description="Whether to generate FAQ section")
     faq_count: int = Field(4, description="Number of FAQ items to generate")
     max_secondary: int = Field(5, description="Maximum secondary keywords to use")
+    include_debug: bool = Field(False, description="Include debug bundle with config, keyword plan, and enforcement details")
 
 
 class OptimizeResponse(BaseModel):
@@ -87,6 +101,11 @@ class OptimizeResponse(BaseModel):
     faq_items: Optional[list[dict]] = None
     document_base64: Optional[str] = None
     suggested_filename: Optional[str] = None
+    # Debug bundle (only included when include_debug=true)
+    debug_bundle: Optional[dict] = Field(
+        None,
+        description="Debug bundle with config, keyword plan, and enforcement details. Only included when include_debug=true."
+    )
 
 
 class HealthResponse(BaseModel):
@@ -306,7 +325,15 @@ async def process_bulk_optimization(
                 secondary=row.secondary_keywords,
             )
 
-            # Step 3: Run optimization
+            # Step 3: Build optimization config - minimal mode for bulk (manual keywords)
+            faq_policy = "always" if generate_faq else "never"
+            opt_config = OptimizationConfig.minimal(
+                faq_policy=faq_policy,
+                faq_count=faq_count,
+                max_secondary=len(row.secondary_keywords) if row.secondary_keywords else 5,
+            )
+
+            # Step 4: Run optimization
             result = optimizer.optimize(
                 content=content,
                 keywords=[],  # Empty - using manual_keywords
@@ -314,6 +341,7 @@ async def process_bulk_optimization(
                 generate_faq=generate_faq,
                 faq_count=faq_count,
                 max_secondary=len(row.secondary_keywords) if row.secondary_keywords else 5,
+                config=opt_config,
             )
 
             # Step 4: Generate DOCX
@@ -324,7 +352,8 @@ async def process_bulk_optimization(
             h1_heading = None
             for me in result.meta_elements:
                 if me.element_name == "H1":
-                    h1_heading = me.optimized or me.current
+                    # Strip markers to prevent [[[ADD]]] from appearing in filename
+                    h1_heading = strip_markers(me.optimized or me.current or "")
                     break
 
             # Generate filename
@@ -345,6 +374,7 @@ async def process_bulk_optimization(
                 output_path,
                 source_url=row.url,
                 document_title=f"{document_title} | Content Improvement",
+                ai_addons=result.ai_addons,
             )
 
             # Read DOCX bytes
@@ -491,7 +521,44 @@ async def optimize_from_url(request: OptimizeURLRequest):
                 secondary=request.manual_keywords.secondary,
             )
 
-        # Run optimization
+        # Determine optimization mode:
+        # - If explicitly specified, use that
+        # - If manual keywords provided, default to "minimal" (insert-only)
+        # - Otherwise, default to "enhanced"
+        mode = request.optimization_mode
+        if mode is None:
+            if request.manual_keywords:
+                mode = OptimizationModeEnum.minimal
+            else:
+                mode = OptimizationModeEnum.enhanced
+
+        # Build OptimizationConfig based on mode
+        if mode == OptimizationModeEnum.insert_only:
+            # Strictest insert-only mode: NO LLM rewrites, deterministic injection only
+            faq_policy = "always" if request.generate_faq else "never"
+            opt_config = OptimizationConfig.insert_only(
+                faq_policy=faq_policy,
+                faq_count=request.faq_count,
+                max_secondary=request.max_secondary,
+            )
+        elif mode == OptimizationModeEnum.minimal:
+            # Insert-only mode with minimal LLM: caps at 1, no FAQ by default
+            faq_policy = "always" if request.generate_faq else "never"
+            opt_config = OptimizationConfig.minimal(
+                faq_policy=faq_policy,
+                faq_count=request.faq_count,
+                max_secondary=request.max_secondary,
+            )
+        else:
+            # Enhanced mode: density targeting, FAQ auto
+            faq_policy = "auto" if request.generate_faq else "never"
+            opt_config = OptimizationConfig.enhanced(
+                faq_policy=faq_policy,
+                faq_count=request.faq_count,
+                max_secondary=request.max_secondary,
+            )
+
+        # Run optimization with config
         optimizer = ContentOptimizer(api_key=api_key)
         result = optimizer.optimize(
             content=content,
@@ -500,13 +567,16 @@ async def optimize_from_url(request: OptimizeURLRequest):
             generate_faq=request.generate_faq,
             faq_count=request.faq_count,
             max_secondary=request.max_secondary,
+            config=opt_config,
+            include_debug=request.include_debug,
         )
 
         # Extract H1 from meta elements for filename generation
         h1_heading = None
         for me in result.meta_elements:
             if me.element_name == "H1":
-                h1_heading = me.optimized or me.current
+                # Strip markers to prevent [[[ADD]]] from appearing in filename
+                h1_heading = strip_markers(me.optimized or me.current or "")
                 break
 
         # Generate suggested filename from URL (prioritizes H1 if available)
@@ -528,6 +598,7 @@ async def optimize_from_url(request: OptimizeURLRequest):
             output_path,
             source_url=request.source_url,
             document_title=f"{document_title} | Content Improvement",
+            ai_addons=result.ai_addons,
         )
 
         # Read and encode the document
@@ -558,6 +629,7 @@ async def optimize_from_url(request: OptimizeURLRequest):
             ],
             document_base64=doc_base64,
             suggested_filename=suggested_filename,
+            debug_bundle=result.debug_bundle,
         )
 
     except Exception as e:
@@ -568,9 +640,11 @@ async def optimize_from_url(request: OptimizeURLRequest):
 async def optimize_from_file(
     file: UploadFile = File(..., description="Word document (.docx) to optimize"),
     keywords_file: UploadFile = File(..., description="Keywords file (CSV or Excel)"),
+    optimization_mode: str = Form("enhanced", description="Optimization mode: 'minimal' (insert-only) or 'enhanced' (full density targeting)"),
     generate_faq: bool = Form(True),
     faq_count: int = Form(4),
     max_secondary: int = Form(5),
+    include_debug: bool = Form(False, description="Include debug bundle in response headers"),
 ):
     """
     Optimize content from an uploaded Word document.
@@ -603,6 +677,33 @@ async def optimize_from_file(
         content = load_docx_content(docx_path)
         keywords = load_keywords(keywords_path)
 
+        # Build optimization config based on mode
+        mode = optimization_mode.lower().strip()
+        if mode == "insert_only":
+            # Strictest insert-only mode: NO LLM rewrites, deterministic injection only
+            faq_policy = "always" if generate_faq else "never"
+            opt_config = OptimizationConfig.insert_only(
+                faq_policy=faq_policy,
+                faq_count=faq_count,
+                max_secondary=max_secondary,
+            )
+        elif mode == "minimal":
+            # Insert-only mode with minimal LLM assistance
+            faq_policy = "always" if generate_faq else "never"
+            opt_config = OptimizationConfig.minimal(
+                faq_policy=faq_policy,
+                faq_count=faq_count,
+                max_secondary=max_secondary,
+            )
+        else:
+            # Enhanced mode: density targeting, FAQ auto
+            faq_policy = "auto" if generate_faq else "never"
+            opt_config = OptimizationConfig.enhanced(
+                faq_policy=faq_policy,
+                faq_count=faq_count,
+                max_secondary=max_secondary,
+            )
+
         # Run optimization
         optimizer = ContentOptimizer(api_key=api_key)
         result = optimizer.optimize(
@@ -611,13 +712,16 @@ async def optimize_from_file(
             generate_faq=generate_faq,
             faq_count=faq_count,
             max_secondary=max_secondary,
+            config=opt_config,
+            include_debug=include_debug,
         )
 
         # Extract H1 from meta elements for filename generation
         h1_heading = None
         for me in result.meta_elements:
             if me.element_name == "H1":
-                h1_heading = me.optimized or me.current
+                # Strip markers to prevent [[[ADD]]] from appearing in filename
+                h1_heading = strip_markers(me.optimized or me.current or "")
                 break
 
         # Generate better filename for download (prioritizes H1 if available)
@@ -641,6 +745,7 @@ async def optimize_from_file(
             output_path,
             source_url=None,  # No URL for file uploads
             document_title=document_title,
+            ai_addons=result.ai_addons,
         )
 
         # Clean up input temp files
@@ -653,12 +758,22 @@ async def optimize_from_file(
 
         output_path.unlink()
 
+        # Build response headers
+        response_headers = {
+            "Content-Disposition": f'attachment; filename="{download_filename}"'
+        }
+
+        # Add debug bundle as base64 encoded header if requested
+        if include_debug and result.debug_bundle:
+            import json
+            debug_json = json.dumps(result.debug_bundle)
+            debug_b64 = base64.b64encode(debug_json.encode()).decode()
+            response_headers["X-Debug-Bundle"] = debug_b64
+
         return StreamingResponse(
             io.BytesIO(doc_bytes),
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={
-                "Content-Disposition": f'attachment; filename="{download_filename}"'
-            }
+            headers=response_headers,
         )
 
     except Exception as e:
@@ -669,8 +784,10 @@ async def optimize_from_file(
 async def optimize_url_with_keywords_file(
     source_url: str = Form(..., description="URL to fetch content from"),
     keywords_file: UploadFile = File(..., description="Keywords file (CSV or Excel)"),
+    optimization_mode: str = Form("enhanced", description="Optimization mode: 'minimal' (insert-only) or 'enhanced' (full density targeting)"),
     generate_faq: bool = Form(True),
     faq_count: int = Form(4),
+    include_debug: bool = Form(False, description="Include debug bundle with config, keyword plan, and enforcement details"),
     max_secondary: int = Form(5),
 ):
     """
@@ -703,6 +820,33 @@ async def optimize_url_with_keywords_file(
         # Clean up temp file
         keywords_path.unlink()
 
+        # Build optimization config based on mode
+        mode = optimization_mode.lower().strip()
+        if mode == "insert_only":
+            # Strictest insert-only mode: NO LLM rewrites, deterministic injection only
+            faq_policy = "always" if generate_faq else "never"
+            opt_config = OptimizationConfig.insert_only(
+                faq_policy=faq_policy,
+                faq_count=faq_count,
+                max_secondary=max_secondary,
+            )
+        elif mode == "minimal":
+            # Insert-only mode with minimal LLM assistance
+            faq_policy = "always" if generate_faq else "never"
+            opt_config = OptimizationConfig.minimal(
+                faq_policy=faq_policy,
+                faq_count=faq_count,
+                max_secondary=max_secondary,
+            )
+        else:
+            # Enhanced mode: density targeting, FAQ auto
+            faq_policy = "auto" if generate_faq else "never"
+            opt_config = OptimizationConfig.enhanced(
+                faq_policy=faq_policy,
+                faq_count=faq_count,
+                max_secondary=max_secondary,
+            )
+
         # Run optimization
         optimizer = ContentOptimizer(api_key=api_key)
         result = optimizer.optimize(
@@ -711,13 +855,16 @@ async def optimize_url_with_keywords_file(
             generate_faq=generate_faq,
             faq_count=faq_count,
             max_secondary=max_secondary,
+            config=opt_config,
+            include_debug=include_debug,
         )
 
         # Extract H1 from meta elements for filename generation
         h1_heading = None
         for me in result.meta_elements:
             if me.element_name == "H1":
-                h1_heading = me.optimized or me.current
+                # Strip markers to prevent [[[ADD]]] from appearing in filename
+                h1_heading = strip_markers(me.optimized or me.current or "")
                 break
 
         # Generate suggested filename from URL (prioritizes H1 if available)
@@ -739,6 +886,7 @@ async def optimize_url_with_keywords_file(
             output_path,
             source_url=source_url,
             document_title=f"{document_title} | Content Improvement",
+            ai_addons=result.ai_addons,
         )
 
         # Read and encode the document
@@ -769,6 +917,7 @@ async def optimize_url_with_keywords_file(
             ],
             document_base64=doc_base64,
             suggested_filename=suggested_filename,
+            debug_bundle=result.debug_bundle,
         )
 
     except Exception as e:

@@ -862,18 +862,26 @@ def cleanup_markers(text: str) -> str:
 
 def compute_h1_markers(original_h1: str, optimized_h1: str) -> str:
     """
-    Special marker handling for H1 headings.
+    Token-level marker handling for H1 headings.
 
-    H1s are treated specially: if the H1 changed at all, wrap the ENTIRE
-    optimized H1 in markers. This ensures the full new heading is green,
-    not just individual changed words.
+    Uses precise token-level diff to highlight ONLY the changed/added tokens.
+
+    Example:
+        Original: "Fortell AI Hearing Aids"
+        Optimized: "Fortell AI Hearing Aids: Advanced Technology for Clear Sound"
+        Result: "Fortell AI Hearing Aids[[[ADD]]]: Advanced Technology for Clear Sound[[[ENDADD]]]"
+
+    This ensures:
+    - Unchanged text stays unhighlighted (black)
+    - Only new/changed tokens are highlighted (green)
+    - Appended subtitles/suffixes are properly highlighted
 
     Args:
         original_h1: The original H1 text.
         optimized_h1: The optimized H1 text (plain, no markers).
 
     Returns:
-        Optimized H1 with markers if changed, or unchanged text if identical.
+        Optimized H1 with token-level markers around changed portions only.
     """
     if not optimized_h1:
         return ""
@@ -882,16 +890,18 @@ def compute_h1_markers(original_h1: str, optimized_h1: str) -> str:
         # No original H1 - everything is new
         return f"{MARK_START}{optimized_h1}{MARK_END}"
 
-    # Normalize both for comparison
+    # Normalize both for comparison (to detect if actually different)
     norm_original = normalize_sentence(original_h1)
     norm_optimized = normalize_sentence(optimized_h1)
 
     if norm_original == norm_optimized:
         # H1 is unchanged - no markers
         return optimized_h1
-    else:
-        # H1 changed - wrap ENTIRE optimized H1
-        return f"{MARK_START}{optimized_h1}{MARK_END}"
+
+    # H1 changed - use TOKEN-LEVEL diff (not all-or-nothing)
+    # This ensures "Fortell AI Hearing Aids" stays black even when
+    # ": Advanced Technology" is appended (which should be green)
+    return add_markers_by_diff(original_h1, optimized_h1)
 
 
 def inject_phrase_with_markers(
@@ -932,6 +942,108 @@ def inject_phrase_with_markers(
             # Insert before final punctuation
             return text[:-1] + f" - {marked_phrase}" + text[-1]
         return text + f" - {marked_phrase}"
+
+
+def inject_keyword_naturally(
+    text: str,
+    keyword: str,
+    strategy: str = "auto",
+) -> str:
+    """
+    Inject a keyword into body text using natural insertion patterns.
+
+    Unlike inject_phrase_with_markers (for titles/H1), this function
+    finds natural insertion points within paragraphs for body content.
+
+    Strategies:
+        - "auto": Pick best strategy based on text structure
+        - "parenthetical": Add "(including [keyword])" after a noun phrase
+        - "appositive": Add ", [keyword]," after a comma or conjunction
+        - "sentence_end": Add "for [keyword]" or "with [keyword]" before period
+
+    Args:
+        text: The paragraph text to inject into.
+        keyword: The keyword phrase to inject.
+        strategy: Injection strategy to use.
+
+    Returns:
+        Text with keyword injected and marked, or original if keyword exists.
+    """
+    if not keyword or not text:
+        return text
+
+    # Check if keyword already exists (case-insensitive)
+    if keyword.lower() in text.lower():
+        return text
+
+    # Split into sentences
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    if not sentences:
+        return text
+
+    # Find the best sentence to inject into (prefer longer ones with more context)
+    best_idx = 0
+    best_len = 0
+    for i, sent in enumerate(sentences):
+        # Skip very short sentences
+        if len(sent) > best_len and len(sent) > 30:
+            best_len = len(sent)
+            best_idx = i
+
+    target_sentence = sentences[best_idx]
+    modified_sentence = target_sentence
+
+    # Strategy: Find a natural insertion point
+    # Look for patterns like "services", "solutions", "options", "needs" etc.
+    # and add the keyword as a clarifying phrase
+
+    # Pattern 1: After words like "services", "solutions", "needs", "options"
+    service_words = r'\b(services?|solutions?|needs?|options?|products?|offerings?|work)\b'
+    match = re.search(service_words, target_sentence, re.IGNORECASE)
+    if match:
+        insert_pos = match.end()
+        marked = f"{MARK_START}including {keyword}{MARK_END}"
+        modified_sentence = (
+            target_sentence[:insert_pos] +
+            f" {marked}" +
+            target_sentence[insert_pos:]
+        )
+    # Pattern 2: Before the final period - add "for [keyword]"
+    elif target_sentence.rstrip().endswith('.'):
+        stripped = target_sentence.rstrip()
+        marked = f"{MARK_START}for {keyword}{MARK_END}"
+        modified_sentence = stripped[:-1] + f" {marked}."
+    # Pattern 3: After a comma - add keyword as appositive
+    elif ',' in target_sentence:
+        # Find last comma before the end
+        comma_pos = target_sentence.rfind(',')
+        if comma_pos > len(target_sentence) // 2:
+            marked = f"{MARK_START}{keyword}{MARK_END}"
+            modified_sentence = (
+                target_sentence[:comma_pos + 1] +
+                f" particularly {marked}," +
+                target_sentence[comma_pos + 1:]
+            )
+        else:
+            # Fallback: add at end
+            marked = f"{MARK_START}for {keyword}{MARK_END}"
+            if target_sentence.rstrip().endswith('.'):
+                stripped = target_sentence.rstrip()
+                modified_sentence = stripped[:-1] + f" {marked}."
+            else:
+                modified_sentence = target_sentence + f" {marked}"
+    else:
+        # Fallback: add at end of sentence
+        marked = f"{MARK_START}for {keyword}{MARK_END}"
+        if target_sentence.rstrip().endswith('.'):
+            stripped = target_sentence.rstrip()
+            modified_sentence = stripped[:-1] + f" {marked}."
+        else:
+            modified_sentence = target_sentence + f" {marked}"
+
+    # Reconstruct paragraph with modified sentence
+    sentences[best_idx] = modified_sentence
+    return ' '.join(sentences)
 
 
 def filter_markers_by_keywords(
@@ -1168,3 +1280,416 @@ def compute_markers_v2(
         rewritten,
         original_sentence_index=sentence_index,
     )
+
+
+def compute_markers_token_level(
+    original_block: str,
+    rewritten: str,
+    full_original_text: str | None = None,
+    brand_variations: set[str] | None = None,
+    keywords: list[str] | None = None,
+) -> str:
+    """
+    Token-level marker computation for body content.
+
+    Unlike sentence-level diff, this ONLY highlights the specific tokens
+    that were inserted or changed. Unchanged text remains unhighlighted.
+
+    This provides precise, minimal highlighting that:
+    - Only highlights actual changes (not entire sentences)
+    - Prevents "highlighting unchanged words" problem
+    - Makes it clear exactly what was modified
+
+    Args:
+        original_block: Original text block being compared.
+        rewritten: Rewritten text (plain, no markers).
+        full_original_text: Complete original document text.
+            If provided, uses it for global context matching.
+        brand_variations: Optional set of brand name variations to exclude.
+        keywords: Optional list of keywords to treat as atomic units.
+
+    Returns:
+        Rewritten text with token-level markers around changed portions only.
+    """
+    if not rewritten:
+        return ""
+
+    if not original_block and not full_original_text:
+        # Everything is new
+        return f"{MARK_START}{rewritten}{MARK_END}"
+
+    # Use full_original_text if provided for better context matching
+    comparison_base = full_original_text if full_original_text else original_block
+
+    # Quick check: if entire block is unchanged, skip markers
+    if normalize_sentence(original_block or "") == normalize_sentence(rewritten):
+        return rewritten
+
+    # Use token-level diff (same as meta elements)
+    return add_markers_by_diff(
+        original=comparison_base or original_block,
+        rewritten=rewritten,
+        brand_variations=brand_variations,
+        keywords=keywords,
+    )
+
+
+# =============================================================================
+# UNIFIED MARKER COMPUTATION ENTRY POINT
+# =============================================================================
+
+
+def compute_markers_unified(
+    original_block: str,
+    rewritten: str,
+    full_original_text: str | None = None,
+    diff_mode: str = "token",
+    brand_variations: set[str] | None = None,
+    keywords: list[str] | None = None,
+) -> str:
+    """
+    Unified marker computation with selectable diff mode.
+
+    This is the recommended entry point for computing markers.
+
+    Args:
+        original_block: Original text block being compared.
+        rewritten: Rewritten text (plain, no markers).
+        full_original_text: Complete original document text.
+        diff_mode: Diff mode - "token" (default) or "sentence".
+            - "token": Only highlight actual inserted/changed tokens (recommended)
+            - "sentence": Highlight entire sentences if any change detected
+        brand_variations: Optional set of brand name variations to exclude.
+        keywords: Optional list of keywords to treat as atomic units.
+
+    Returns:
+        Rewritten text with markers around changed portions.
+    """
+    if diff_mode == "sentence":
+        return compute_markers_v2(
+            original_block=original_block,
+            rewritten=rewritten,
+            full_original_text=full_original_text,
+        )
+    else:
+        # Default: token-level diff
+        return compute_markers_token_level(
+            original_block=original_block,
+            rewritten=rewritten,
+            full_original_text=full_original_text,
+            brand_variations=brand_variations,
+            keywords=keywords,
+        )
+
+
+# =============================================================================
+# TOKEN-LEVEL DIFF FOR META ELEMENTS (Title, Meta Description)
+# =============================================================================
+# These functions provide precise token-level diff for short text elements
+# where the all-or-nothing approach would incorrectly highlight unchanged text.
+# =============================================================================
+
+
+def compute_title_markers(original_title: str, optimized_title: str) -> str:
+    """
+    Token-level marker handling for Title tags.
+
+    Uses precise token-level diff to highlight ONLY changed/added tokens.
+
+    Example:
+        Original: "Best Hearing Aids 2024"
+        Optimized: "Best AI Hearing Aids 2024 | Crystal Clear Sound"
+        Result: "Best [[[ADD]]]AI [[[ENDADD]]]Hearing Aids 2024[[[ADD]]] | Crystal Clear Sound[[[ENDADD]]]"
+
+    Args:
+        original_title: The original title text.
+        optimized_title: The optimized title text (plain, no markers).
+
+    Returns:
+        Optimized title with token-level markers around changed portions only.
+    """
+    if not optimized_title:
+        return ""
+
+    if not original_title:
+        # No original - everything is new
+        return f"{MARK_START}{optimized_title}{MARK_END}"
+
+    # Normalize for comparison
+    norm_original = normalize_sentence(original_title)
+    norm_optimized = normalize_sentence(optimized_title)
+
+    if norm_original == norm_optimized:
+        # Title is unchanged - no markers
+        return optimized_title
+
+    # Use token-level diff
+    return add_markers_by_diff(original_title, optimized_title)
+
+
+def compute_meta_desc_markers(original_desc: str, optimized_desc: str) -> str:
+    """
+    Token-level marker handling for Meta Descriptions.
+
+    Uses precise token-level diff to highlight ONLY changed/added tokens.
+
+    Args:
+        original_desc: The original meta description.
+        optimized_desc: The optimized meta description (plain, no markers).
+
+    Returns:
+        Optimized description with token-level markers around changed portions only.
+    """
+    if not optimized_desc:
+        return ""
+
+    if not original_desc:
+        # No original - everything is new
+        return f"{MARK_START}{optimized_desc}{MARK_END}"
+
+    # Normalize for comparison
+    norm_original = normalize_sentence(original_desc)
+    norm_optimized = normalize_sentence(optimized_desc)
+
+    if norm_original == norm_optimized:
+        # Description is unchanged - no markers
+        return optimized_desc
+
+    # Use token-level diff
+    return add_markers_by_diff(original_desc, optimized_desc)
+
+
+# =============================================================================
+# URL-PROTECTED DIFF FUNCTIONS
+# =============================================================================
+# These functions wrap the diff operations with URL protection to prevent
+# URL corruption during processing.
+# =============================================================================
+
+
+def add_markers_with_url_protection(
+    original: str,
+    rewritten: str,
+    brand_variations: Optional[set[str]] = None,
+    keywords: Optional[list[str]] = None,
+) -> str:
+    """
+    Add markers using token-level diff WITH URL protection.
+
+    This function:
+    1. Protects URLs/emails/phones with placeholders
+    2. Runs token-level diff on protected text
+    3. Restores original URLs/emails/phones
+
+    This prevents URL corruption like "fortell.com" → "Fortell. com"
+
+    Args:
+        original: Original text.
+        rewritten: Rewritten text (plain, no markers).
+        brand_variations: Optional set of brand variations to exclude from highlighting.
+        keywords: Optional list of keywords to treat as atomic units.
+
+    Returns:
+        Text with markers and original URLs preserved.
+    """
+    # Import here to avoid circular imports
+    from .locked_tokens import protect_locked_tokens, restore_locked_tokens
+
+    if not original:
+        if rewritten:
+            return f"{MARK_START}{rewritten}{MARK_END}"
+        return ""
+
+    if not rewritten:
+        return ""
+
+    # Protect URLs in both texts
+    protected_original, orig_map = protect_locked_tokens(original)
+    protected_rewritten, rewr_map = protect_locked_tokens(rewritten)
+
+    # Merge token maps (prefer original's URLs for restoration)
+    combined_map = {**rewr_map, **orig_map}
+
+    # Run token-level diff on protected text
+    marked = add_markers_by_diff(
+        protected_original,
+        protected_rewritten,
+        brand_variations=brand_variations,
+        keywords=keywords,
+    )
+
+    # Restore original URLs
+    return restore_locked_tokens(marked, combined_map)
+
+
+# =============================================================================
+# UNHIGHLIGHTED SPAN VALIDATION
+# =============================================================================
+# These functions validate that unhighlighted (black) text actually matches
+# the original source text. This catches cases where formatting changes
+# sneak into "unchanged" content.
+# =============================================================================
+
+
+def extract_unhighlighted_spans(marked_text: str) -> list[str]:
+    """
+    Extract all unhighlighted (non-marked) text spans from marked text.
+
+    Args:
+        marked_text: Text with [[[ADD]]]/[[[ENDADD]]] markers.
+
+    Returns:
+        List of text spans that are NOT inside markers.
+    """
+    if not marked_text:
+        return []
+
+    # Remove marked content and extract remaining spans
+    result = []
+    current_pos = 0
+    text = marked_text
+
+    while True:
+        # Find next marker start
+        start_pos = text.find(MARK_START, current_pos)
+
+        if start_pos == -1:
+            # No more markers - rest is unhighlighted
+            remaining = text[current_pos:].strip()
+            if remaining:
+                result.append(remaining)
+            break
+
+        # Extract unhighlighted span before marker
+        span = text[current_pos:start_pos].strip()
+        if span:
+            result.append(span)
+
+        # Find marker end
+        end_pos = text.find(MARK_END, start_pos)
+        if end_pos == -1:
+            # Malformed markers - stop
+            break
+
+        current_pos = end_pos + len(MARK_END)
+
+    return result
+
+
+def validate_unhighlighted_matches_source(
+    original: str,
+    marked_output: str,
+    strict: bool = False,
+) -> tuple[bool, list[str]]:
+    """
+    Validate that unhighlighted spans in output exist in original text.
+
+    This catches cases where:
+    - Formatting changes sneak into "unchanged" text
+    - Words are reordered without being highlighted
+    - Punctuation is changed without being highlighted
+
+    Args:
+        original: The original source text.
+        marked_output: The output text with markers.
+        strict: If True, require exact substring match.
+                If False, allow normalized (whitespace/punctuation) matching.
+
+    Returns:
+        Tuple of (is_valid, mismatched_spans).
+        is_valid is True if all unhighlighted spans exist in original.
+        mismatched_spans contains any spans that don't match.
+    """
+    if not original or not marked_output:
+        return True, []
+
+    unhighlighted = extract_unhighlighted_spans(marked_output)
+    mismatches = []
+
+    for span in unhighlighted:
+        if strict:
+            # Exact substring match
+            if span not in original:
+                mismatches.append(span)
+        else:
+            # Normalized match (collapse whitespace, normalize punctuation)
+            norm_span = normalize_sentence(span)
+            norm_original = normalize_sentence(original)
+
+            # Check if normalized span appears in normalized original
+            # Allow some flexibility for word boundaries
+            words = norm_span.split()
+            if len(words) >= 3:
+                # For longer spans, check if the core words appear
+                found = all(word in norm_original for word in words)
+                if not found:
+                    mismatches.append(span)
+
+    return len(mismatches) == 0, mismatches
+
+
+def get_highlight_integrity_report(
+    original: str,
+    marked_output: str,
+) -> dict:
+    """
+    Generate a comprehensive report on highlight integrity.
+
+    Checks:
+    1. All unhighlighted text exists in original
+    2. No URL corruption
+    3. Marker balance (no leaked markers)
+
+    Args:
+        original: Original source text.
+        marked_output: Output text with markers.
+
+    Returns:
+        Dict with 'is_valid', 'issues' list, and diagnostic details.
+    """
+    from .locked_tokens import validate_urls_preserved, detect_url_corruption
+
+    report = {
+        "is_valid": True,
+        "issues": [],
+        "unhighlighted_valid": True,
+        "urls_preserved": True,
+        "markers_balanced": True,
+        "details": {},
+    }
+
+    # Check unhighlighted spans
+    valid, mismatches = validate_unhighlighted_matches_source(original, marked_output)
+    if not valid:
+        report["is_valid"] = False
+        report["unhighlighted_valid"] = False
+        report["issues"].append(f"Unhighlighted text not in source: {mismatches[:3]}")
+        report["details"]["mismatched_spans"] = mismatches
+
+    # Check URL preservation
+    stripped_output = strip_markers(marked_output)
+    lost_urls = validate_urls_preserved(original, stripped_output)
+    if lost_urls:
+        report["is_valid"] = False
+        report["urls_preserved"] = False
+        report["issues"].append(f"URLs lost or corrupted: {lost_urls[:3]}")
+        report["details"]["lost_urls"] = lost_urls
+
+    # Check for URL corruption patterns
+    corruptions = detect_url_corruption(stripped_output)
+    if corruptions:
+        report["is_valid"] = False
+        report["urls_preserved"] = False
+        report["issues"].append(f"URL corruption detected: {corruptions[:3]}")
+        report["details"]["url_corruptions"] = corruptions
+
+    # Check marker balance
+    start_count = marked_output.count(MARK_START)
+    end_count = marked_output.count(MARK_END)
+    if start_count != end_count:
+        report["is_valid"] = False
+        report["markers_balanced"] = False
+        report["issues"].append(f"Unbalanced markers: {start_count} starts, {end_count} ends")
+        report["details"]["marker_counts"] = {"start": start_count, "end": end_count}
+
+    return report

@@ -60,11 +60,12 @@ class TestKeywordEnforcement:
         assert result == text  # No change needed - already present
 
     def test_ensure_keyword_in_text_inject_at_start(self):
-        """If keyword missing, inject at start with colon separator."""
+        """If keyword missing, inject naturally at start."""
         text = "Security systems help protect property."
         result = ensure_keyword_in_text(text, "external cameras", position="start")
-        assert result.startswith("external cameras:")
+        # Function now uses natural language integration instead of crude colon prefix
         assert "external cameras" in result.lower()
+        assert result.startswith("Explore external cameras.")
 
     def test_ensure_keyword_in_text_inject_at_end(self):
         """If keyword missing, inject at end."""

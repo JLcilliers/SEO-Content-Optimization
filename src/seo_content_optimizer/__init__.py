@@ -10,7 +10,7 @@ A fully automated SEO content optimization tool that:
 __version__ = "1.0.0"
 __author__ = "SEO Content Optimizer Team"
 
-from .config import OptimizationConfig
+from .config import OptimizationConfig, OptimizationMode
 
 from .models import (
     Keyword,
@@ -20,6 +20,7 @@ from .models import (
     KeywordPlan,
     OptimizationResult,
     MetaElement,
+    KeywordUsageDetail,
     # V2 Architecture models
     ContentBlock,
     ContentBlockType,
@@ -97,9 +98,67 @@ from .repetition_guard import (
     KeywordDensityConfig,
 )
 
+# Locked token protection (URLs, emails, phones)
+from .locked_tokens import (
+    LockedTokenProtector,
+    protect_locked_tokens,
+    restore_locked_tokens,
+    validate_urls_preserved,
+    detect_url_corruption,
+)
+
+# Highlight integrity validation
+from .diff_markers import (
+    compute_title_markers,
+    compute_h1_markers,
+    compute_meta_desc_markers,
+    add_markers_with_url_protection,
+    validate_unhighlighted_matches_source,
+    get_highlight_integrity_report,
+    # Token-level diff (precise highlighting)
+    compute_markers_token_level,
+    compute_markers_unified,
+)
+
+# Cap validation and debug bundle (insert-only mode)
+from .optimizer import (
+    KeywordCapValidationResult,
+    CapValidationReport,
+    DebugBundle,
+    DebugBundleConfig,
+    DebugBundleKeyword,
+    RunManifest,
+)
+
+# Post-optimization enforcement (insert-only mode)
+from .enforcement import (
+    run_enforcement,
+    enforce_keyword_caps,
+    enforce_keyword_delta_budgets,
+    enforce_budget_limits,
+    validate_insertions_have_keywords,
+    EnforcementResult,
+    MarkerSpan,
+    DeltaBudgetResult,
+    # Strip-additions validator
+    strip_marked_additions,
+    validate_strip_additions,
+    get_strip_additions_report,
+    StripAdditionsResult,
+)
+
+# Highlight integrity validation
+from .highlight_integrity import (
+    run_highlight_integrity_check,
+    get_highlight_diff_summary,
+    HighlightIntegrityReport,
+    HighlightIssue,
+)
+
 __all__ = [
     # Configuration
     "OptimizationConfig",
+    "OptimizationMode",
     # Legacy models
     "Keyword",
     "PageMeta",
@@ -108,6 +167,7 @@ __all__ = [
     "KeywordPlan",
     "OptimizationResult",
     "MetaElement",
+    "KeywordUsageDetail",
     # V2 Architecture models
     "ContentBlock",
     "ContentBlockType",
@@ -163,4 +223,39 @@ __all__ = [
     "check_keyword_density",
     "clean_repetition",
     "KeywordDensityConfig",
+    # Highlight integrity (diff markers)
+    "compute_title_markers",
+    "compute_h1_markers",
+    "compute_meta_desc_markers",
+    "add_markers_with_url_protection",
+    "validate_unhighlighted_matches_source",
+    "get_highlight_integrity_report",
+    "compute_markers_token_level",
+    "compute_markers_unified",
+    # Cap validation and debug bundle (insert-only mode)
+    "KeywordCapValidationResult",
+    "CapValidationReport",
+    "DebugBundle",
+    "DebugBundleConfig",
+    "DebugBundleKeyword",
+    "RunManifest",
+    # Post-optimization enforcement (insert-only mode)
+    "run_enforcement",
+    "enforce_keyword_caps",
+    "enforce_keyword_delta_budgets",
+    "enforce_budget_limits",
+    "validate_insertions_have_keywords",
+    "EnforcementResult",
+    "MarkerSpan",
+    "DeltaBudgetResult",
+    # Strip-additions validator
+    "strip_marked_additions",
+    "validate_strip_additions",
+    "get_strip_additions_report",
+    "StripAdditionsResult",
+    # Highlight integrity validation
+    "run_highlight_integrity_check",
+    "get_highlight_diff_summary",
+    "HighlightIntegrityReport",
+    "HighlightIssue",
 ]

@@ -52,10 +52,26 @@ class TestOptimizationConfig:
         assert config.force_faq is True
 
     def test_faq_policy_auto(self):
-        """Test faq_policy='auto' enables conditional FAQ."""
-        config = OptimizationConfig(faq_policy="auto")
+        """Test faq_policy='auto' enables conditional FAQ in enhanced mode."""
+        # In minimal mode, FAQ is disabled unless forced (faq_policy='always')
+        # In enhanced mode, FAQ follows the faq_policy setting
+        config = OptimizationConfig(optimization_mode="enhanced", faq_policy="auto")
         assert config.should_generate_faq is True
         assert config.force_faq is False
+
+    def test_faq_policy_auto_minimal_mode(self):
+        """Test faq_policy='auto' is disabled in minimal mode."""
+        # In minimal mode, FAQ is disabled unless explicitly forced
+        config = OptimizationConfig(optimization_mode="minimal", faq_policy="auto")
+        assert config.should_generate_faq is False
+        assert config.force_faq is False
+
+    def test_faq_policy_always_minimal_mode(self):
+        """Test faq_policy='always' works in minimal mode."""
+        # Even in minimal mode, 'always' should force FAQ generation
+        config = OptimizationConfig(optimization_mode="minimal", faq_policy="always")
+        assert config.should_generate_faq is True
+        assert config.force_faq is True
 
     def test_should_generate_ai_addons_true(self):
         """Test AI addons generation check when enabled."""

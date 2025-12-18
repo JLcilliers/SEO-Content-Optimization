@@ -23,12 +23,15 @@ from docx.text.paragraph import Paragraph
 
 from .llm_client import ADD_END, ADD_START
 from .diff_markers import normalize_paragraph_spacing
-from .ai_addons import AIAddons, ChunkMap, Chunk
 from .models import (
+    AIAddonsResult,
+    ChunkData,
+    ChunkMapStats,
     ContentBlock,
     ContentBlockType,
     FAQItem,
     HeadingLevel,
+    KeywordUsageDetail,
     ListBlock,
     MetaElement,
     OptimizationResult,
@@ -406,7 +409,7 @@ class DocxWriter:
         output_path: Union[str, Path],
         source_url: Optional[str] = None,
         document_title: Optional[str] = None,
-        ai_addons: Optional[AIAddons] = None,
+        ai_addons: Optional[AIAddonsResult] = None,
     ) -> Path:
         """
         Write the optimization result to a Word document.
@@ -416,7 +419,7 @@ class DocxWriter:
             output_path: Path for the output .docx file.
             source_url: Optional source URL to display at top.
             document_title: Optional custom document title.
-            ai_addons: Optional AIAddons with Key Takeaways and Chunk Map.
+            ai_addons: Optional AIAddonsResult with Key Takeaways and Chunk Map.
 
         Returns:
             Path to the created document.
@@ -448,6 +451,7 @@ class DocxWriter:
             primary_keyword=result.primary_keyword,
             secondary_keywords=result.secondary_keywords,
             keyword_usage_counts=result.keyword_usage_counts,
+            keyword_usage_detailed=result.keyword_usage_detailed,
         )
 
         # Add meta elements table
@@ -529,38 +533,53 @@ class DocxWriter:
         primary_keyword: Optional[str],
         secondary_keywords: Optional[list[str]],
         keyword_usage_counts: Optional[dict[str, int]] = None,
+        keyword_usage_detailed: Optional[dict[str, KeywordUsageDetail]] = None,
     ) -> None:
         """Add the Keyword Plan table showing selected keywords and their usage counts.
 
         This table displays the primary keyword and secondary keywords
-        that were used for optimization, along with how many times each
-        keyword appears in the final optimized content.
+        that were used for optimization, along with:
+        - Existing: How many times keyword already appeared in source
+        - Added: How many NEW occurrences were added by optimization
+        - Total: Final count in optimized content
 
         Args:
             primary_keyword: The primary keyword used for optimization.
             secondary_keywords: List of secondary keywords used.
-            keyword_usage_counts: Dictionary mapping keyword phrase to occurrence count.
+            keyword_usage_counts: Dictionary mapping keyword phrase to occurrence count (legacy).
+            keyword_usage_detailed: Dictionary mapping keyword to KeywordUsageDetail (preferred).
         """
         # Add section header
         self.doc.add_heading("Keyword Plan", level=2)
 
-        # Ensure we have a usage counts dict
+        # Ensure we have usage counts
         if keyword_usage_counts is None:
             keyword_usage_counts = {}
+        if keyword_usage_detailed is None:
+            keyword_usage_detailed = {}
 
-        # Create table with 3 columns: Type, Keyword, and Usage Count
-        table = self.doc.add_table(rows=1, cols=3)
+        # Determine if we have detailed data
+        has_detailed = bool(keyword_usage_detailed)
+
+        # Create table with 5 columns if detailed, 3 if legacy
+        num_cols = 5 if has_detailed else 3
+        table = self.doc.add_table(rows=1, cols=num_cols)
         table.style = "Table Grid"
         table.alignment = WD_TABLE_ALIGNMENT.LEFT
 
         # Set column widths
-        widths = [Inches(1.2), Inches(4.0), Inches(1.0)]
+        if has_detailed:
+            widths = [Inches(1.0), Inches(3.5), Inches(0.8), Inches(0.8), Inches(0.8)]
+            headers = ["Type", "Keyword", "Existing", "Added", "Total"]
+        else:
+            widths = [Inches(1.2), Inches(4.0), Inches(1.0)]
+            headers = ["Type", "Keyword", "Usage Count"]
+
         for i, width in enumerate(widths):
             table.columns[i].width = width
 
         # Add header row
         header_cells = table.rows[0].cells
-        headers = ["Type", "Keyword", "Usage Count"]
         for i, header in enumerate(headers):
             header_cells[i].text = header
             # Bold header text
@@ -580,9 +599,20 @@ class DocxWriter:
                 for run in paragraph.runs:
                     run.font.bold = True
             cells[1].text = primary_keyword
-            # Add usage count
-            count = keyword_usage_counts.get(primary_keyword, 0)
-            cells[2].text = str(count)
+
+            if has_detailed and primary_keyword in keyword_usage_detailed:
+                detail = keyword_usage_detailed[primary_keyword]
+                cells[2].text = str(detail.existing_total)
+                cells[3].text = str(detail.added_total)
+                cells[4].text = str(detail.total)
+                # Highlight the Added count in green if > 0
+                if detail.added_total > 0:
+                    cells[3].paragraphs[0].clear()
+                    add_marked_text(cells[3].paragraphs[0], f"{MARK_START}{detail.added_total}{MARK_END}")
+            else:
+                # Fallback to legacy count
+                count = keyword_usage_counts.get(primary_keyword, 0)
+                cells[2].text = str(count)
 
         # Add secondary keyword rows
         if secondary_keywords:
@@ -591,9 +621,20 @@ class DocxWriter:
                 cells = row.cells
                 cells[0].text = f"Secondary {i + 1}"
                 cells[1].text = secondary
-                # Add usage count
-                count = keyword_usage_counts.get(secondary, 0)
-                cells[2].text = str(count)
+
+                if has_detailed and secondary in keyword_usage_detailed:
+                    detail = keyword_usage_detailed[secondary]
+                    cells[2].text = str(detail.existing_total)
+                    cells[3].text = str(detail.added_total)
+                    cells[4].text = str(detail.total)
+                    # Highlight the Added count in green if > 0
+                    if detail.added_total > 0:
+                        cells[3].paragraphs[0].clear()
+                        add_marked_text(cells[3].paragraphs[0], f"{MARK_START}{detail.added_total}{MARK_END}")
+                else:
+                    # Fallback to legacy count
+                    count = keyword_usage_counts.get(secondary, 0)
+                    cells[2].text = str(count)
 
         # Add spacing after table
         self.doc.add_paragraph()
@@ -784,7 +825,7 @@ class DocxWriter:
 
         return stripped
 
-    def _add_ai_addons_section(self, ai_addons: AIAddons) -> None:
+    def _add_ai_addons_section(self, ai_addons: AIAddonsResult) -> None:
         """
         Add the AI Optimization Add-ons section.
 
@@ -794,7 +835,7 @@ class DocxWriter:
         - Chunk Data table (for AI retrieval)
 
         Args:
-            ai_addons: AIAddons object with generated content.
+            ai_addons: AIAddonsResult object with generated content.
         """
         if not ai_addons:
             return
@@ -809,8 +850,11 @@ class DocxWriter:
             self._add_key_takeaways(ai_addons.key_takeaways)
 
         # Add Chunk Data table
-        if ai_addons.chunk_map and ai_addons.chunk_map.chunks:
-            self._add_chunk_map_table(ai_addons.chunk_map)
+        if ai_addons.chunk_map_chunks:
+            self._add_chunk_map_table(
+                chunks=ai_addons.chunk_map_chunks,
+                stats=ai_addons.chunk_map_stats,
+            )
 
     def _add_key_takeaways(self, takeaways: list[str]) -> None:
         """
@@ -834,26 +878,32 @@ class DocxWriter:
         # Add spacing
         self.doc.add_paragraph()
 
-    def _add_chunk_map_table(self, chunk_map: ChunkMap) -> None:
+    def _add_chunk_map_table(
+        self,
+        chunks: list[ChunkData],
+        stats: Optional[ChunkMapStats] = None,
+    ) -> None:
         """
         Add the Chunk Data table.
 
         Args:
-            chunk_map: ChunkMap with chunk metadata.
+            chunks: List of ChunkData with chunk metadata.
+            stats: Optional ChunkMapStats with aggregate statistics.
         """
         # Add subheading (green)
         subheader = self.doc.add_heading("Chunk Data", level=3)
         for run in subheader.runs:
             run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
 
-        # Add summary stats
-        stats_para = self.doc.add_paragraph()
-        stats_text = (
-            f"{MARK_START}Total Chunks: {chunk_map.total_chunks} | "
-            f"Total Words: {chunk_map.total_words} | "
-            f"Est. Tokens: {chunk_map.total_tokens}{MARK_END}"
-        )
-        add_marked_text(stats_para, stats_text)
+        # Add summary stats if available
+        if stats:
+            stats_para = self.doc.add_paragraph()
+            stats_text = (
+                f"{MARK_START}Total Chunks: {stats.total_chunks} | "
+                f"Total Words: {stats.total_words} | "
+                f"Est. Tokens: {stats.total_tokens}{MARK_END}"
+            )
+            add_marked_text(stats_para, stats_text)
 
         # Create table with columns: ID, Section, Summary, Best Question, Keywords
         table = self.doc.add_table(rows=1, cols=5)
@@ -877,7 +927,7 @@ class DocxWriter:
             set_cell_shading(header_cells[i], "D9D9D9")
 
         # Add chunk rows (all green)
-        for chunk in chunk_map.chunks:
+        for chunk in chunks:
             row = table.add_row()
             cells = row.cells
 
@@ -885,9 +935,9 @@ class DocxWriter:
             cells[0].text = ""
             add_marked_text(cells[0].paragraphs[0], f"{MARK_START}{chunk.chunk_id}{MARK_END}")
 
-            # Section/Heading path
+            # Section/Heading context
             cells[1].text = ""
-            heading_text = chunk.heading_path[:50] + "..." if len(chunk.heading_path) > 50 else chunk.heading_path
+            heading_text = chunk.heading_context[:50] + "..." if len(chunk.heading_context) > 50 else chunk.heading_context
             add_marked_text(cells[1].paragraphs[0], f"{MARK_START}{heading_text}{MARK_END}")
 
             # Summary
@@ -1099,7 +1149,7 @@ def write_optimization_result(
         Path to created document.
     """
     writer = DocxWriter()
-    return writer.write(result, output_path)
+    return writer.write(result, output_path, ai_addons=result.ai_addons)
 
 
 def create_simple_docx_with_highlights(
