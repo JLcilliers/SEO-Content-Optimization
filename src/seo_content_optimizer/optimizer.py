@@ -3083,9 +3083,8 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
             if modified_text != block_text:
                 updated_blocks.insert(0, ParagraphBlock(
                     text=modified_text.strip(),
-                    original_index=block.original_index,
-                    is_heading=block.is_heading,
                     heading_level=block.heading_level,
+                    style_name=block.style_name,
                 ))
             else:
                 updated_blocks.insert(0, block)
@@ -3181,9 +3180,8 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
             if modified_text != block_text:
                 updated_blocks.insert(0, ParagraphBlock(
                     text=modified_text.strip(),
-                    original_index=block.original_index,
-                    is_heading=block.is_heading,
                     heading_level=block.heading_level,
+                    style_name=block.style_name,
                 ))
             else:
                 updated_blocks.insert(0, block)
