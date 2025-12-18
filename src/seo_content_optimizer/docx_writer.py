@@ -159,6 +159,52 @@ def strip_leaked_markers(text: str) -> str:
     return result
 
 
+# Orphan words that should NOT appear as highlighted content on their own
+ORPHAN_WORDS = {
+    # Articles, prepositions, conjunctions (lowercase)
+    "the", "a", "an", "in", "on", "at", "of", "to", "for", "with", "by", "from",
+    "and", "or", "but",
+    # Single tech/category words (lowercase)
+    "ai", "technology", "features", "benefits", "process", "solution", "solutions",
+    # Gerunds/verbs that appear as fragments (lowercase)
+    "transforms", "provides", "enables", "helps", "making", "being", "getting", "using",
+}
+
+
+def _is_orphan_highlighted_content(text: str) -> bool:
+    """
+    Check if highlighted content is an orphan fragment that should be skipped.
+
+    Orphan fragments are highlighted segments containing only:
+    - Single orphan words (the, and, AI, Technology, etc.)
+    - Multiple orphan words with no meaningful content
+
+    Args:
+        text: The highlighted text content (already cleaned of markers).
+
+    Returns:
+        True if the content is an orphan fragment and should NOT be highlighted.
+    """
+    if not text:
+        return True
+
+    # Normalize and split into words
+    words = text.strip().split()
+
+    if not words:
+        return True
+
+    # Check if ALL words are orphan words
+    for word in words:
+        word_lower = word.lower().strip(".,!?;:'\"()-")
+        if word_lower and word_lower not in ORPHAN_WORDS:
+            # Found a non-orphan word - this is valid content
+            return False
+
+    # All words are orphan words - this is an orphan fragment
+    return True
+
+
 def set_cell_shading(cell, color: str) -> None:
     """Set background color/shading for a table cell."""
     tc = cell._tc
@@ -293,7 +339,8 @@ def add_marked_text(paragraph: Paragraph, text: str, font_name: str = "Poppins")
         if highlighted:
             # SAFETY: Validate highlighted content has no nested markers
             clean_highlighted = strip_leaked_markers(highlighted)
-            if clean_highlighted:
+            # ORPHAN FRAGMENT CHECK: Skip if content is only orphan words
+            if clean_highlighted and not _is_orphan_highlighted_content(clean_highlighted):
                 run = paragraph.add_run(clean_highlighted)
                 run.font.name = font_name
                 # CRITICAL: Use the official enum for proper Word compatibility

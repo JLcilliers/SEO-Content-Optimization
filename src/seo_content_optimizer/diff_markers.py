@@ -516,6 +516,25 @@ def add_markers_by_diff(
         result
     )
 
+    # ORPHAN FRAGMENT REMOVAL: Clean up markers containing only orphan tokens
+    # These are fragments that don't form meaningful content on their own.
+    # Examples: "the", "and", "AI", "Technology", "and AI Technology"
+    # Pattern: markers containing ONLY orphan words (possibly multiple, separated by spaces)
+    orphan_words = (
+        # Articles, prepositions, conjunctions
+        r"the|a|an|in|on|at|of|to|for|with|by|from|and|or|but|"
+        # Single tech/category words that appear as broken fragments
+        r"AI|Technology|Features|Benefits|Process|Solutions?|"
+        # Gerunds/verbs that appear as fragments
+        r"Transforms|Provides|Enables|Helps|Making|Being|Getting|Using"
+    )
+    # Match markers containing only orphan words (case insensitive, one or more words)
+    orphan_marker_pattern = rf"{_re.escape(MARK_START)}\s*(?:{orphan_words})(?:\s+(?:{orphan_words}))*\s*{_re.escape(MARK_END)}"
+    result = _re.sub(orphan_marker_pattern, "", result, flags=_re.IGNORECASE)
+
+    # Clean up any double spaces left after orphan removal
+    result = _re.sub(r"  +", " ", result)
+
     # Postprocess: Restore multi-word keywords from atomic tokens
     if token_map:
         result = postprocess_keywords_from_diff(result, token_map)
@@ -996,6 +1015,23 @@ def inject_keyword_naturally(
     # Strategy: Find a natural insertion point
     # Look for patterns like "services", "solutions", "options", "needs" etc.
     # and add the keyword as a clarifying phrase
+    #
+    # NOTE: Filler words (including, for, particularly) MUST be inside markers
+    # so that strip_marked_additions() correctly restores original text.
+    # Green highlighting = ALL new text, not just the keyword.
+
+    # Determine the best connector for this keyword
+    # Use "as part of the" for process/procedure keywords, "related to" for others
+    keyword_lower = keyword.lower()
+    is_process_keyword = any(word in keyword_lower for word in [
+        'process', 'procedure', 'fitting', 'evaluation', 'assessment',
+        'installation', 'setup', 'configuration', 'treatment', 'session'
+    ])
+
+    if is_process_keyword:
+        connector = "as part of the"
+    else:
+        connector = "related to"
 
     # Pattern 1: After words like "services", "solutions", "needs", "options"
     service_words = r'\b(services?|solutions?|needs?|options?|products?|offerings?|work)\b'
@@ -1008,25 +1044,25 @@ def inject_keyword_naturally(
             f" {marked}" +
             target_sentence[insert_pos:]
         )
-    # Pattern 2: Before the final period - add "for [keyword]"
+    # Pattern 2: Before the final period - add contextually appropriate phrase
     elif target_sentence.rstrip().endswith('.'):
         stripped = target_sentence.rstrip()
-        marked = f"{MARK_START}for {keyword}{MARK_END}"
+        marked = f"{MARK_START}{connector} {keyword}{MARK_END}"
         modified_sentence = stripped[:-1] + f" {marked}."
     # Pattern 3: After a comma - add keyword as appositive
     elif ',' in target_sentence:
         # Find last comma before the end
         comma_pos = target_sentence.rfind(',')
         if comma_pos > len(target_sentence) // 2:
-            marked = f"{MARK_START}{keyword}{MARK_END}"
+            marked = f"{MARK_START}particularly {connector} {keyword}{MARK_END}"
             modified_sentence = (
                 target_sentence[:comma_pos + 1] +
-                f" particularly {marked}," +
+                f" {marked}," +
                 target_sentence[comma_pos + 1:]
             )
         else:
             # Fallback: add at end
-            marked = f"{MARK_START}for {keyword}{MARK_END}"
+            marked = f"{MARK_START}{connector} {keyword}{MARK_END}"
             if target_sentence.rstrip().endswith('.'):
                 stripped = target_sentence.rstrip()
                 modified_sentence = stripped[:-1] + f" {marked}."
@@ -1034,7 +1070,7 @@ def inject_keyword_naturally(
                 modified_sentence = target_sentence + f" {marked}"
     else:
         # Fallback: add at end of sentence
-        marked = f"{MARK_START}for {keyword}{MARK_END}"
+        marked = f"{MARK_START}{connector} {keyword}{MARK_END}"
         if target_sentence.rstrip().endswith('.'):
             stripped = target_sentence.rstrip()
             modified_sentence = stripped[:-1] + f" {marked}."

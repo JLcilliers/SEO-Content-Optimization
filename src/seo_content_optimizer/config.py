@@ -187,14 +187,17 @@ class OptimizationConfig:
     def should_enforce_keyword_caps(self) -> bool:
         """Check if keyword occurrence caps should be enforced.
 
-        In minimal mode with enforce_keyword_caps=True, the optimizer will
-        REMOVE excess keyword occurrences to ensure each keyword appears
-        at most N times (where N is the cap value).
+        When enforce_keyword_caps=True, the optimizer will REMOVE excess
+        keyword occurrences to ensure each keyword appears at most N times
+        (where N is the cap value from primary_keyword_body_cap and
+        secondary_keyword_body_cap settings).
 
-        This is the key difference from enhanced mode which only enforces
-        MINIMUMS (targets), not MAXIMUMS (caps).
+        In enhanced mode with enforce_keyword_caps=True (default), caps prevent
+        keyword stuffing while still targeting optimal density.
+
+        In minimal mode, caps are typically set lower (1 each) for minimal changes.
         """
-        return self.is_minimal_mode and self.enforce_keyword_caps
+        return self.enforce_keyword_caps
 
     @property
     def has_keyword_allowlist(self) -> bool:
@@ -350,6 +353,7 @@ class OptimizationConfig:
         - Distributes keywords across paragraphs
         - May expand content with new sections
         - FAQ and AI add-ons enabled by default
+        - Hard cap: max 6 primary keyword uses in body to prevent stuffing
 
         Args:
             **overrides: Override any config values
@@ -363,6 +367,10 @@ class OptimizationConfig:
             "generate_ai_sections": True,
             "generate_key_takeaways": True,
             "generate_chunk_map": True,
+            # Hard cap to prevent keyword stuffing (ChatGPT recommends 4-6 in body)
+            "primary_keyword_body_cap": 6,
+            "secondary_keyword_body_cap": 3,
+            "enforce_keyword_caps": True,  # Enforce even in enhanced mode
         }
         defaults.update(overrides)
         return cls(**defaults)

@@ -1437,3 +1437,96 @@ class TestBrandNameNormalization:
         # Then compute markers - should have no markers
         result = compute_markers(original, normalized)
         assert MARK_START not in result
+
+
+class TestOrphanFragmentRemoval:
+    """Tests for orphan fragment removal from highlighted content.
+
+    Orphan fragments are highlighted segments containing ONLY words like:
+    - Articles: the, a, an
+    - Prepositions: in, on, at, of, to, for, with, by, from
+    - Conjunctions: and, or, but
+    - Single tech words: AI, Technology, Features, etc.
+
+    These should be removed from markers, not highlighted.
+    """
+
+    def test_orphan_single_article_removed(self):
+        """Single article 'the' in markers should be removed."""
+        original = "Our security system works well."
+        # LLM adds "the" by itself - should be cleaned
+        rewritten = "Our the security system works well."
+
+        result = add_markers_by_diff(original, rewritten)
+
+        # The orphan "the" should not appear in markers
+        # It might still be in text but not highlighted
+        assert f"{MARK_START}the{MARK_END}" not in result
+
+    def test_orphan_conjunction_removed(self):
+        """Single conjunction 'and' in markers should be removed."""
+        original = "Gate security cameras"
+        rewritten = "Gate security and cameras"
+
+        result = add_markers_by_diff(original, rewritten)
+
+        # Standalone "and" should not be in markers
+        assert f"{MARK_START}and{MARK_END}" not in result
+
+    def test_orphan_tech_words_removed(self):
+        """Single tech words like 'AI', 'Technology' should be removed."""
+        original = "Our smart system"
+        rewritten = "Our AI Technology smart system"
+
+        result = add_markers_by_diff(original, rewritten)
+
+        # "AI" and "Technology" alone should not be highlighted
+        assert f"{MARK_START}AI{MARK_END}" not in result
+        assert f"{MARK_START}Technology{MARK_END}" not in result
+        # Combined orphan phrase should also be removed
+        assert f"{MARK_START}AI Technology{MARK_END}" not in result
+
+    def test_orphan_multiple_words_removed(self):
+        """Multiple orphan words together should be removed."""
+        original = "System works"
+        rewritten = "System and the works"
+
+        result = add_markers_by_diff(original, rewritten)
+
+        # "and the" together are both orphan words
+        assert f"{MARK_START}and the{MARK_END}" not in result.replace(" ", "").replace(MARK_START, "").replace(MARK_END, "") or \
+               f"{MARK_START}and{MARK_END}" not in result
+
+    def test_meaningful_content_preserved(self):
+        """Meaningful content should still be highlighted."""
+        original = "The system works."
+        rewritten = "The advanced security system works."
+
+        result = add_markers_by_diff(original, rewritten)
+
+        # "advanced security" is meaningful content
+        assert MARK_START in result
+        assert "advanced" in strip_markers(result)
+        assert "security" in strip_markers(result)
+
+    def test_keyword_phrase_not_treated_as_orphan(self):
+        """Full keyword phrases should NOT be removed as orphans."""
+        original = "Our cameras are good."
+        rewritten = "Our hearing aid fitting process cameras are good."
+
+        result = add_markers_by_diff(original, rewritten)
+
+        # "hearing aid fitting process" is meaningful, should be highlighted
+        assert MARK_START in result
+        plain = strip_markers(result)
+        assert "hearing aid fitting process" in plain
+
+    def test_gerund_alone_removed(self):
+        """Standalone gerunds like 'Transforms' should be removed."""
+        original = "The system process"
+        rewritten = "The Transforms system process"
+
+        result = add_markers_by_diff(original, rewritten)
+
+        # "Transforms" alone should not be highlighted
+        assert f"{MARK_START}Transforms{MARK_END}" not in result

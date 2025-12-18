@@ -145,6 +145,11 @@ from .enforcement import (
     validate_strip_additions,
     get_strip_additions_report,
     StripAdditionsResult,
+    # Allowlist enforcement
+    validate_additions_against_allowlist,
+    remove_unauthorized_additions,
+    get_allowlist_validation_report,
+    AllowlistValidationResult,
 )
 
 # Highlight integrity validation
@@ -253,6 +258,11 @@ __all__ = [
     "validate_strip_additions",
     "get_strip_additions_report",
     "StripAdditionsResult",
+    # Allowlist enforcement
+    "validate_additions_against_allowlist",
+    "remove_unauthorized_additions",
+    "get_allowlist_validation_report",
+    "AllowlistValidationResult",
     # Highlight integrity validation
     "run_highlight_integrity_check",
     "get_highlight_diff_summary",

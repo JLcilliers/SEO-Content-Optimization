@@ -386,11 +386,12 @@ def _normalize_text_for_matching(text: str) -> str:
     return text.strip()
 
 
-def _calculate_text_overlap(text1: str, text2: str) -> float:
+def calculate_text_overlap(text1: str, text2: str) -> float:
     """
     Calculate overlap between two texts (0.0 to 1.0).
 
     Uses word-level Jaccard similarity.
+    Public function for use in content preservation validation.
     """
     if not text1 or not text2:
         return 0.0
@@ -445,7 +446,7 @@ def validate_blocks_with_matching(
             if not opt_block:
                 continue
 
-            overlap = _calculate_text_overlap(orig_block, opt_block)
+            overlap = calculate_text_overlap(orig_block, opt_block)
             if overlap > best_match_score:
                 best_match_score = overlap
                 best_match_idx = j
@@ -495,6 +496,174 @@ def restore_missing_blocks(
     result = list(optimized_blocks)
     for block in unmatched:
         result.append(block)
+
+    return result
+
+
+# =============================================================================
+# ANCHOR BLOCK PROTECTION
+# =============================================================================
+# Anchor blocks contain critical content that must NEVER be lost:
+# - Statistics (numbers, percentages)
+# - Product specifications
+# - Clinical/research data
+# - CTA sections
+
+
+def is_anchor_block(text: str) -> bool:
+    """
+    Check if a block contains anchor content (stats, numbers, critical info).
+
+    Anchor blocks are content that should NEVER be lost during optimization.
+
+    Args:
+        text: Block text to check.
+
+    Returns:
+        True if block contains anchor content.
+    """
+    if not text:
+        return False
+
+    text_stripped = text.strip()
+
+    # SHORT NUMERIC BLOCKS: Check these FIRST before length filter
+    # Standalone stats like "18+", "235x", "95%", "19x" are critical anchors
+    short_anchor_patterns = [
+        r'^\d+\+$',  # "18+" style
+        r'^\d+(?:\.\d+)?[xX]$',  # "235x", "19x"
+        r'^\d+(?:\.\d+)?\s*%$',  # "95%"
+        r'^\$\d+(?:,\d{3})*(?:\.\d{2})?$',  # "$100", "$1,000"
+        r'^\d+(?:,\d{3})+$',  # "1,000", "10,000"
+    ]
+    for pattern in short_anchor_patterns:
+        if re.match(pattern, text_stripped):
+            return True
+
+    # Now apply length filter for longer patterns
+    if len(text_stripped) < 20:
+        return False
+
+    # Patterns that indicate anchor content
+    anchor_patterns = [
+        # Statistics and numbers
+        r'\d+\s*(?:hours?|hrs?|minutes?|mins?|days?|weeks?|months?|years?)',  # Time durations
+        r'\d+(?:\.\d+)?[xX]',  # Multipliers (e.g., "235x", "19x")
+        r'\d+(?:\.\d+)?\s*%',  # Percentages
+        r'\d+\+',  # "18+" style numbers
+        r'\$\d+',  # Prices
+        r'\d+,\d{3}',  # Large numbers with commas
+        r'(?:FDA|CE|ISO|HIPAA|GDPR)',  # Compliance/certifications
+        r'clinical\s+(?:trial|study|research)',  # Clinical data
+        r'(?:study|research|trial)\s+(?:shows?|found|demonstrates?)',  # Research claims
+        r'(?:AI|artificial intelligence|machine learning)',  # AI/tech claims
+        r'(?:chip|processor|technology|sensor)',  # Product tech specs
+        # CTA patterns
+        r'(?:book|schedule|request|start|get)\s+(?:a|your|an)\s+(?:consultation|appointment|demo|trial)',
+        r'(?:call|contact|reach)\s+(?:us|now|today)',
+        r'(?:learn|discover|explore)\s+more',
+    ]
+
+    text_lower = text.lower()
+    for pattern in anchor_patterns:
+        if re.search(pattern, text_lower, re.IGNORECASE):
+            return True
+
+    return False
+
+
+def extract_anchor_blocks(blocks: list[str]) -> list[tuple[int, str]]:
+    """
+    Extract anchor blocks with their indices.
+
+    Args:
+        blocks: List of text blocks.
+
+    Returns:
+        List of (index, text) tuples for anchor blocks.
+    """
+    anchors = []
+    for i, block in enumerate(blocks):
+        if is_anchor_block(block):
+            anchors.append((i, block))
+    return anchors
+
+
+def validate_anchor_blocks_preserved(
+    original_blocks: list[str],
+    optimized_blocks: list[str],
+    min_match_threshold: float = 0.40,  # Lower threshold for anchors
+) -> tuple[bool, list[str]]:
+    """
+    Validate that all anchor blocks from original are preserved in optimized.
+
+    Anchor blocks are CRITICAL and should NEVER be lost. This uses a lower
+    match threshold because anchor content may be reformatted.
+
+    Args:
+        original_blocks: Original text blocks.
+        optimized_blocks: Optimized text blocks.
+        min_match_threshold: Minimum overlap to consider a match.
+
+    Returns:
+        Tuple of (all_preserved, missing_anchor_texts).
+    """
+    anchors = extract_anchor_blocks(original_blocks)
+
+    if not anchors:
+        return True, []
+
+    optimized_text = " ".join(optimized_blocks).lower()
+    missing = []
+
+    for idx, anchor_text in anchors:
+        # Check if anchor content exists in optimized output
+        # First try: direct text match
+        if anchor_text.lower()[:100] in optimized_text:
+            continue
+
+        # Second try: word overlap matching
+        best_overlap = 0.0
+        for opt_block in optimized_blocks:
+            overlap = calculate_text_overlap(anchor_text, opt_block)
+            if overlap > best_overlap:
+                best_overlap = overlap
+
+        if best_overlap < min_match_threshold:
+            missing.append(anchor_text)
+
+    return len(missing) == 0, missing
+
+
+def restore_anchor_blocks(
+    original_blocks: list[str],
+    optimized_blocks: list[str],
+) -> list[str]:
+    """
+    Ensure all anchor blocks from original are present in optimized output.
+
+    If anchor blocks are missing, restore them to prevent content loss.
+
+    Args:
+        original_blocks: Original text blocks.
+        optimized_blocks: Optimized text blocks.
+
+    Returns:
+        Optimized blocks with missing anchors restored.
+    """
+    all_preserved, missing_anchors = validate_anchor_blocks_preserved(
+        original_blocks, optimized_blocks
+    )
+
+    if all_preserved:
+        return optimized_blocks
+
+    # Restore missing anchor blocks
+    result = list(optimized_blocks)
+    import sys
+    for anchor in missing_anchors:
+        print(f"DEBUG: Restoring missing anchor block: {anchor[:80]}...", file=sys.stderr)
+        result.append(anchor)
 
     return result
 
@@ -568,23 +737,135 @@ def validate_locked_content_preserved(
     return len(missing) == 0, missing
 
 
+# =============================================================================
+# ORPHAN FRAGMENT DETECTION
+# =============================================================================
+# Detect and remove stray fragments that don't form complete sentences.
+# Common issues: single words ("the", "Transforms"), dangling articles.
+
+# Patterns that indicate orphan fragments
+ORPHAN_PATTERNS = [
+    # Single articles/prepositions/conjunctions at start/end of blocks
+    r'^(?:the|a|an|in|on|at|of|to|for|with|by|from|and|or|but)\s*$',
+    # Single verbs/gerunds as fragments
+    r'^(?:Transforms|Provides|Enables|Helps|Making|Being|Getting|Using)\s*$',
+    # Single tech/category words that appear as broken fragments (not valid standalone)
+    r'^(?:AI|Technology|Features|Benefits|Process|Solutions?)\s*$',
+    # Incomplete phrases
+    r'^(?:and\s+the|or\s+the|the\s+most|is\s+a)\s*$',
+    # Just punctuation or whitespace
+    r'^[\s\.\,\;\:\-]*$',
+]
+
+
+def is_orphan_fragment(text: str) -> bool:
+    """
+    Check if a text block is an orphan fragment.
+
+    Args:
+        text: Text to check.
+
+    Returns:
+        True if the text appears to be an orphan fragment.
+    """
+    if not text:
+        return True
+
+    text = text.strip()
+
+    # Empty or very short
+    if len(text) < 3:
+        return True
+
+    # Check against orphan patterns
+    for pattern in ORPHAN_PATTERNS:
+        if re.match(pattern, text, re.IGNORECASE):
+            return True
+
+    # EXCEPTION: Stats and anchor content are NOT orphans
+    # These are meaningful short blocks (e.g., "18+", "235x", "95%", "19x", "$100")
+    stat_pattern = re.compile(
+        r'^'
+        r'(?:\$[\d,]+(?:\.\d+)?[KkMmBb]?'  # Money: $100, $10,000, $1M
+        r'|\d+(?:\.\d+)?[%xX+]'  # Stats: 95%, 235x, 18+
+        r'|\d+(?:\.\d+)?[KkMmBb]'  # Large numbers: 100K, 10M
+        r'|\d+(?:st|nd|rd|th)'  # Ordinals: 1st, 2nd, 3rd
+        r'|\d+(?:\.\d+)?(?:\s*(?:years?|months?|days?|hours?|minutes?|seconds?|weeks?))?'  # Time durations
+        r')'
+        r'\s*$',
+        re.IGNORECASE
+    )
+    if stat_pattern.match(text):
+        return False  # Stats are NOT orphans
+
+    # Single word that's not a complete sentence
+    words = text.split()
+    if len(words) == 1:
+        # Single word is orphan unless it's a valid standalone (e.g., "Yes.", "No.")
+        if not text.endswith(('.', '!', '?')):
+            return True
+        # Even with punctuation, single articles/prepositions/conjunctions are orphans
+        word_lower = text.rstrip('.!?').lower()
+        if word_lower in {'the', 'a', 'an', 'in', 'on', 'to', 'of', 'and', 'or', 'but', 'for', 'with', 'by', 'from'}:
+            return True
+        # Single tech/category words are also orphans (even with punctuation)
+        if word_lower in {'ai', 'technology', 'features', 'benefits', 'process', 'solution', 'solutions'}:
+            return True
+
+    # Two words without ending punctuation
+    if len(words) == 2 and not text.endswith(('.', '!', '?')):
+        return True
+
+    return False
+
+
+def remove_orphan_fragments(blocks: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Remove orphan fragments from a list of text blocks.
+
+    Args:
+        blocks: List of text blocks.
+
+    Returns:
+        Tuple of (cleaned_blocks, removed_fragments).
+    """
+    cleaned = []
+    removed = []
+
+    for block in blocks:
+        if is_orphan_fragment(block):
+            removed.append(block)
+        else:
+            cleaned.append(block)
+
+    return cleaned, removed
+
+
 def validate_and_preserve(
     llm_output: str,
     original_content: str,
     context: str = "content",
     min_preservation_ratio: float = 0.85,
+    min_word_overlap: float = 0.50,
 ) -> tuple[str, bool, str]:
     """
-    Validate LLM output and fall back to original if content was deleted.
+    Validate LLM output and fall back to original if content was deleted or replaced.
 
     This combines blocked term validation with content preservation validation.
-    If either check fails, returns the original content.
+    If any check fails, returns the original content.
+
+    Validation checks:
+    1. No blocked terms introduced
+    2. Length ratio preserved (min 85% by default)
+    3. Word overlap preserved (min 50% by default) - prevents content replacement
 
     Args:
         llm_output: The content generated by the LLM.
         original_content: The original content before optimization.
         context: Description for error messages.
-        min_preservation_ratio: Minimum ratio of original content to preserve.
+        min_preservation_ratio: Minimum ratio of original length to preserve.
+        min_word_overlap: Minimum word-level overlap (Jaccard similarity).
+            This prevents the LLM from completely replacing content.
 
     Returns:
         Tuple of (safe_content, is_valid, error_message).
@@ -595,11 +876,20 @@ def validate_and_preserve(
     if not term_result.is_valid:
         return original_content, False, f"Blocked terms: {term_result.violations}"
 
-    # Then check content preservation
+    # Then check content preservation (length ratio)
     is_preserved, preservation_error = validate_content_preservation(
         original_content, llm_output, min_preservation_ratio, context
     )
     if not is_preserved:
         return original_content, False, preservation_error
+
+    # Check word-level overlap to prevent content replacement
+    # This catches cases where LLM replaces content with different words of similar length
+    overlap = calculate_text_overlap(original_content, llm_output)
+    if overlap < min_word_overlap:
+        return original_content, False, (
+            f"CRITICAL: {context} content replaced - "
+            f"word overlap: {overlap:.1%} (minimum: {min_word_overlap:.1%})"
+        )
 
     return llm_output, True, ""

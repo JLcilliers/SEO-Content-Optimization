@@ -39,6 +39,9 @@ from .output_validator import (
     validate_block_preservation,  # Content preservation: check block count
     validate_faq_items,
     find_blocked_terms,
+    restore_anchor_blocks,  # Content preservation: restore missing anchor blocks
+    is_anchor_block,  # Content preservation: identify anchor blocks
+    remove_orphan_fragments,  # QA: remove stray fragments (e.g., "the", "Transforms")
 )
 from .llm_client import (
     LLMClient,
@@ -49,6 +52,7 @@ from .diff_markers import (
     MARK_END as ADD_END,
     MARK_START as ADD_START,
     add_markers_by_diff,  # Token-level diff: only NEW/CHANGED tokens highlighted
+    compute_markers_unified,  # Unified diff: supports both token and sentence modes
     compute_h1_markers,
     inject_phrase_with_markers,
     inject_keyword_naturally,  # Minimal mode: natural body keyword injection
@@ -90,6 +94,9 @@ from .page_archetype import (
     filter_guide_phrases,
     get_content_guidance,
     ArchetypeResult,
+)
+from .repetition_guard import (
+    remove_duplicate_sentences,  # QA: remove exact duplicate sentences
 )
 from .highlight_integrity import (
     run_highlight_integrity_check,
@@ -1282,6 +1289,68 @@ class ContentOptimizer:
         for i, b in enumerate(h1_final):
             print(f"  FINAL H1 Block {i}: '{b.text[:100]}...'", file=sys.stderr)
 
+        # Step 7.91: RESTORE MISSING ANCHOR BLOCKS (stats, CTA, product specs)
+        # This ensures critical content (numbers, percentages, CTAs, AI/tech specs)
+        # is NEVER lost during optimization. Anchor blocks are appended if missing.
+        print("DEBUG Step 7.91: Checking for missing anchor blocks...", file=sys.stderr)
+        original_texts = [b.text for b in blocks if b.text]
+        optimized_texts = [b.text for b in optimized_blocks if b.text]
+
+        # Restore any missing anchor blocks
+        restored_texts = restore_anchor_blocks(original_texts, optimized_texts)
+
+        # If new blocks were added, convert them to ParagraphBlock and append
+        if len(restored_texts) > len(optimized_texts):
+            new_anchor_count = len(restored_texts) - len(optimized_texts)
+            print(f"DEBUG Step 7.91: Restored {new_anchor_count} missing anchor block(s)", file=sys.stderr)
+
+            # The new blocks are at the end of restored_texts
+            for i in range(len(optimized_texts), len(restored_texts)):
+                new_block = ParagraphBlock(
+                    text=restored_texts[i],
+                    heading_level=HeadingLevel.BODY,
+                )
+                optimized_blocks.append(new_block)
+                print(f"  Restored: '{restored_texts[i][:80]}...'", file=sys.stderr)
+        else:
+            print("DEBUG Step 7.91: All anchor blocks preserved, no restoration needed", file=sys.stderr)
+
+        # Step 7.92: QA GATES - Remove orphan fragments and duplicate sentences
+        # This catches assembly artifacts like stray "the", dangling "Transforms", duplicates
+        print("DEBUG Step 7.92: Running QA gates (orphan fragments, deduplication)...", file=sys.stderr)
+
+        # Remove orphan fragments
+        block_texts = [b.text for b in optimized_blocks if b.text]
+        cleaned_texts, removed_fragments = remove_orphan_fragments(block_texts)
+        if removed_fragments:
+            print(f"DEBUG Step 7.92: Removed {len(removed_fragments)} orphan fragment(s):", file=sys.stderr)
+            for frag in removed_fragments:
+                print(f"  - '{frag}'", file=sys.stderr)
+
+            # Rebuild optimized_blocks excluding orphan fragments
+            new_blocks = []
+            for block in optimized_blocks:
+                if block.text and block.text not in removed_fragments:
+                    new_blocks.append(block)
+            optimized_blocks = new_blocks
+
+        # Remove duplicate sentences within each block
+        dedup_count = 0
+        for i, block in enumerate(optimized_blocks):
+            if block.text and len(block.text) > 20:
+                original_text = block.text
+                deduped_text = remove_duplicate_sentences(block.text)
+                if deduped_text != original_text:
+                    dedup_count += 1
+                    optimized_blocks[i] = ParagraphBlock(
+                        text=deduped_text,
+                        heading_level=block.heading_level,
+                    )
+        if dedup_count:
+            print(f"DEBUG Step 7.92: Removed duplicate sentences from {dedup_count} block(s)", file=sys.stderr)
+        else:
+            print("DEBUG Step 7.92: No duplicate sentences found", file=sys.stderr)
+
         # Step 7.95: Generate AI Optimization Add-ons (Key Takeaways + Chunk Map)
         # This is policy-controlled by effective_config.generate_ai_sections
         ai_addons_result = None
@@ -1585,9 +1654,10 @@ class ContentOptimizer:
         primary = keyword_plan.primary.phrase
         secondary = [kw.phrase for kw in keyword_plan.secondary]
 
-        # INSERT-ONLY MODE: No LLM optimization, only inject keywords if missing
+        # MINIMAL/INSERT-ONLY MODE: No LLM optimization, only inject keywords if missing
+        # Use is_minimal_mode for consistency with body optimization (matches both minimal and insert_only)
         effective_config = getattr(self, '_effective_config', None)
-        if effective_config and effective_config.is_insert_only_mode:
+        if effective_config and effective_config.is_minimal_mode:
             return self._optimize_meta_elements_insert_only(
                 current_title=current_title,
                 current_meta_desc=current_meta_desc,
@@ -1752,7 +1822,7 @@ class ContentOptimizer:
         primary: str,
     ) -> list[MetaElement]:
         """
-        Insert-only mode meta element optimization.
+        Minimal/insert-only mode meta element optimization.
 
         No LLM rewrites. Only injects primary keyword if missing.
         Markers wrap ONLY the injected phrase, not the entire element.
@@ -1767,6 +1837,10 @@ class ContentOptimizer:
             List of MetaElement with minimal changes.
         """
         from .diff_markers import inject_phrase_with_markers
+
+        # Determine mode label for messages
+        effective_config = getattr(self, '_effective_config', None)
+        mode_label = "insert-only" if (effective_config and effective_config.is_insert_only_mode) else "minimal"
 
         meta_elements = []
 
@@ -1783,7 +1857,7 @@ class ContentOptimizer:
                 element_name="Title Tag",
                 current=current_title,
                 optimized=optimized_title,
-                why_changed="Keyword injected (insert-only mode)" if title_changed else "Title locked (insert-only mode)",
+                why_changed=f"Keyword injected ({mode_label} mode)" if title_changed else f"Title locked ({mode_label} mode)",
             )
         )
 
@@ -1800,17 +1874,17 @@ class ContentOptimizer:
                 element_name="Meta Description",
                 current=current_meta_desc,
                 optimized=optimized_desc,
-                why_changed="Keyword injected (insert-only mode)" if desc_changed else "Meta description locked (insert-only mode)",
+                why_changed=f"Keyword injected ({mode_label} mode)" if desc_changed else f"Meta description locked ({mode_label} mode)",
             )
         )
 
-        # H1: Always locked in insert-only mode (no changes)
+        # H1: Always locked in minimal/insert-only mode (no changes)
         meta_elements.append(
             MetaElement(
                 element_name="H1",
                 current=current_h1,
                 optimized=current_h1 or "",
-                why_changed="H1 locked (insert-only mode)",
+                why_changed=f"H1 locked ({mode_label} mode)",
             )
         )
 
@@ -1824,23 +1898,21 @@ class ContentOptimizer:
         keywords: Optional[list[str]] = None,
     ) -> str:
         """
-        Token-Level Diff: highlight ONLY new/changed tokens.
+        Sentence-Level Diff: highlight ENTIRE sentences that differ from original.
 
-        This implements precise token-level diff using SequenceMatcher:
-        - Only tokens that are NEW or CHANGED get highlighted (green)
-        - Original unchanged tokens remain unhighlighted (black)
-        - Prevents the issue where adding a sentence before existing content
-          causes the existing content to also be highlighted
+        This implements sentence-level diff for clear, predictable highlighting:
+        - Any sentence that differs from the original is FULLY highlighted (green)
+        - Sentences that are IDENTICAL to original remain unhighlighted (black)
+        - This makes it clear what has changed for human reviewers
         - BRAND NAMES are EXCLUDED from highlighting (never shown as changes)
         - Multi-word KEYWORDS are treated as ATOMIC UNITS (not partially highlighted)
 
         Algorithm:
-        1. Preprocess to replace multi-word keywords with atomic tokens
-        2. Tokenize both original and optimized text
-        3. Use SequenceMatcher to find exact changes
-        4. Only wrap "insert" and "replace" operations in markers
-        5. Skip highlighting for brand name variations
-        6. Postprocess to restore keyword phrases
+        1. Build sentence index from full original text
+        2. For each sentence in optimized text:
+           - If sentence matches original (normalized) → no markers (black)
+           - If sentence differs → wrap ENTIRE sentence in markers (green)
+        3. Brand names and keywords are handled consistently
 
         Args:
             original: Original text block.
@@ -1849,7 +1921,7 @@ class ContentOptimizer:
             keywords: Optional list of keyword phrases to treat as atomic units.
 
         Returns:
-            Text with markers around ONLY new/changed tokens.
+            Text with markers around ENTIRE sentences that differ from original.
         """
         # Get brand variations for exclusion (if available)
         brand_variations = None
@@ -1873,13 +1945,14 @@ class ContentOptimizer:
                 keywords = [keyword_plan.primary.phrase]
                 keywords.extend([kw.phrase for kw in keyword_plan.secondary])
 
-        # Compare original block directly against optimized block
-        # This ensures only tokens that changed within THIS block get highlighted
-        # Brand variations are excluded from highlighting
-        # Multi-word keywords are treated as atomic units (not partially highlighted)
-        return add_markers_by_diff(
-            original,
-            optimized,
+        # Use sentence-level diff: highlight ENTIRE sentences that differ
+        # This makes it clear to reviewers exactly what changed
+        # Any sentence that differs from the original gets fully highlighted
+        return compute_markers_unified(
+            original_block=original,
+            rewritten=optimized,
+            full_original_text=full_original_text,
+            diff_mode="sentence",  # SENTENCE-LEVEL: entire sentence highlighted if changed
             brand_variations=brand_variations,
             keywords=keywords,
         )
@@ -2236,7 +2309,13 @@ class ContentOptimizer:
         """
         Ensure primary keyword appears in the first ~100 words of body content.
 
-        If not present, inject an intro sentence containing the primary keyword.
+        BEHAVIOR BY MODE:
+        - MINIMAL/INSERT-ONLY MODE: Use deterministic injection into existing block, NOT new sentences
+        - ENHANCED MODE: May add intro sentence, but respects page archetype
+
+        ARCHETYPE CHECK:
+        - Landing pages, product pages, homepages: NO guide framing allowed
+        - Blog posts, articles, tutorials: Guide framing IS appropriate
 
         Args:
             blocks: The optimized content blocks.
@@ -2263,8 +2342,47 @@ class ContentOptimizer:
         if primary.lower() in first_100_words:
             return blocks  # Already present
 
-        # Primary keyword missing from first 100 words - inject intro sentence
-        intro_sentence = f"This guide covers everything you need to know about {primary}."
+        # Get config and archetype for mode/framing checks
+        effective_config = getattr(self, '_effective_config', None)
+        page_archetype = getattr(self, '_page_archetype', None)
+        is_minimal_mode = effective_config and effective_config.is_minimal_mode
+        allows_guide_framing = page_archetype and page_archetype.allows_guide_framing
+
+        import sys
+
+        if is_minimal_mode:
+            # MINIMAL/INSERT-ONLY MODE: Use deterministic injection, NO new sentences
+            print(f"DEBUG: _ensure_primary_in_first_100_words - MINIMAL MODE: "
+                  f"Using deterministic injection (not adding new sentences)", file=sys.stderr)
+
+            # Try to inject into the first suitable body block
+            for i, block in enumerate(blocks):
+                if block.heading_level == HeadingLevel.H1 or block.is_heading:
+                    continue
+                if len(block.text) > 30:  # Only inject into substantial blocks
+                    injected = inject_keyword_naturally(block.text, primary)
+                    if injected != block.text:  # Injection succeeded
+                        blocks[i] = ParagraphBlock(
+                            text=injected,
+                            heading_level=block.heading_level,
+                        )
+                        print(f"DEBUG: Injected primary '{primary}' into first body block", file=sys.stderr)
+                        return blocks
+
+            # If no suitable block found, skip (don't add new content in minimal mode)
+            print(f"DEBUG: No suitable block for primary keyword injection - SKIPPING", file=sys.stderr)
+            return blocks
+
+        # ENHANCED MODE: May add intro sentence
+        # But check archetype first - no guide framing for landing pages
+        if not allows_guide_framing:
+            print(f"DEBUG: _ensure_primary_in_first_100_words - Guide framing BLOCKED "
+                  f"(archetype: {page_archetype.archetype if page_archetype else 'unknown'})", file=sys.stderr)
+            # Use a neutral intro instead of "This guide covers..."
+            intro_sentence = f"Learn more about {primary} and how it can benefit your needs."
+        else:
+            # Guide framing is appropriate for this page type
+            intro_sentence = f"This guide covers everything you need to know about {primary}."
 
         # Find the first non-H1 body block and prepend the intro
         result_blocks = []
@@ -2418,8 +2536,10 @@ Return ONLY the optimized heading text, with no markers or annotations."""
         """
         Ensure ALL keywords from the keyword plan appear in the content.
 
-        This is the final safety net - if any keyword was missed by the LLM
-        during optimization, we add a fallback sentence containing it.
+        In MINIMAL/INSERT-ONLY mode: Uses deterministic injection (inject_keyword_naturally)
+        into existing body paragraphs. NO LLM is used.
+
+        In ENHANCED mode: Uses LLM to generate natural fallback sentences.
 
         Args:
             blocks: The optimized content blocks.
@@ -2448,7 +2568,95 @@ Return ONLY the optimized heading text, with no markers or annotations."""
         if not missing_keywords:
             return blocks
 
-        # Generate fallback sentences for missing keywords
+        # Get effective config for mode check
+        effective_config = getattr(self, '_effective_config', None)
+        is_minimal_mode = effective_config and effective_config.is_minimal_mode
+
+        if is_minimal_mode:
+            # MINIMAL/INSERT-ONLY MODE: Use deterministic injection, NO LLM
+            import sys
+            print(f"DEBUG: _ensure_all_keywords_present - MINIMAL MODE: "
+                  f"Using deterministic injection for {len(missing_keywords)} missing keywords", file=sys.stderr)
+
+            # Find suitable body paragraphs for injection
+            body_blocks = [
+                (i, b) for i, b in enumerate(blocks)
+                if b.heading_level == HeadingLevel.BODY and len(b.text) > 50
+            ]
+
+            # Inject each missing keyword into a suitable paragraph
+            modified_indices = set()
+            for kw in missing_keywords:
+                injected_successfully = False
+
+                # First try: Find a block that hasn't been modified yet and is suitable (>50 chars)
+                for idx, block in body_blocks:
+                    if idx not in modified_indices:
+                        # Use inject_keyword_naturally for deterministic insertion
+                        injected = inject_keyword_naturally(block.text, kw)
+                        if injected != block.text:  # Injection succeeded
+                            blocks[idx] = ParagraphBlock(
+                                text=injected,
+                                heading_level=block.heading_level,
+                            )
+                            modified_indices.add(idx)
+                            print(f"DEBUG: Injected keyword '{kw}' into block {idx}", file=sys.stderr)
+                            injected_successfully = True
+                            break
+
+                # Second try: Lower threshold - try ANY body block (>20 chars)
+                if not injected_successfully:
+                    any_body_blocks = [
+                        (i, b) for i, b in enumerate(blocks)
+                        if b.heading_level == HeadingLevel.BODY and len(b.text) > 20
+                    ]
+                    for idx, block in any_body_blocks:
+                        if idx not in modified_indices:
+                            injected = inject_keyword_naturally(block.text, kw)
+                            if injected != block.text:
+                                blocks[idx] = ParagraphBlock(
+                                    text=injected,
+                                    heading_level=block.heading_level,
+                                )
+                                modified_indices.add(idx)
+                                print(f"DEBUG: Injected keyword '{kw}' into smaller block {idx}", file=sys.stderr)
+                                injected_successfully = True
+                                break
+
+                # Final fallback: Append a new sentence containing the keyword
+                # NEVER skip a keyword - this ensures 100% coverage
+                if not injected_successfully:
+                    print(f"DEBUG: No suitable block for keyword '{kw}' - ADDING FALLBACK SENTENCE", file=sys.stderr)
+                    # Create a natural fallback sentence
+                    fallback_sentence = f"Understanding the {kw} is an important step in your journey."
+                    marked_fallback = f"{ADD_START}{fallback_sentence}{ADD_END}"
+
+                    # Find the last body paragraph and append to it
+                    for idx in reversed(range(len(blocks))):
+                        if blocks[idx].heading_level == HeadingLevel.BODY:
+                            current_text = blocks[idx].text
+                            # Append the fallback sentence
+                            if current_text and not current_text.endswith(('.', '!', '?')):
+                                current_text += '.'
+                            blocks[idx] = ParagraphBlock(
+                                text=f"{current_text} {marked_fallback}",
+                                heading_level=blocks[idx].heading_level,
+                            )
+                            print(f"DEBUG: Appended fallback sentence for '{kw}' to block {idx}", file=sys.stderr)
+                            injected_successfully = True
+                            break
+
+                    # Absolute last resort: Add as new paragraph
+                    if not injected_successfully:
+                        blocks.append(ParagraphBlock(
+                            text=marked_fallback,
+                            heading_level=HeadingLevel.BODY,
+                        ))
+                        print(f"DEBUG: Added new paragraph for keyword '{kw}'", file=sys.stderr)
+
+            return blocks
+
+        # ENHANCED MODE: Use LLM to generate fallback sentences
         fallback_sentences = self._generate_keyword_fallback_sentences(
             missing_keywords=missing_keywords,
             topic=topic,
@@ -3371,6 +3579,8 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
         Returns:
             Updated blocks with keywords inserted throughout.
         """
+        import sys
+
         updated_blocks = list(blocks)
 
         # Get original content for validation
@@ -3386,14 +3596,25 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
             for keyword in keywords:
                 sentence = self._generate_single_keyword_sentence(keyword, topic)
                 if not sentence:
+                    print(f"    WARNING: Failed to generate sentence for '{keyword}'", file=sys.stderr)
                     continue
 
-                # Validate sentence
+                # Validate sentence (but don't reject just because it changed)
                 validated, _ = validate_and_fallback(sentence, full_original_text, "keyword_sentence")
-                if validated != sentence:
+
+                # Use validated sentence, but ensure keyword is still present
+                final_sentence = validated if validated else sentence
+                if keyword.lower() not in final_sentence.lower():
+                    print(f"    WARNING: Keyword '{keyword}' lost during validation, using original", file=sys.stderr)
+                    final_sentence = sentence
+
+                # Double-check keyword is actually in the final sentence
+                if keyword.lower() not in final_sentence.lower():
+                    print(f"    ERROR: Keyword '{keyword}' not in generated sentence, skipping", file=sys.stderr)
                     continue
 
                 # Append to the block
+                sentence = final_sentence  # Use the validated/final sentence
                 block = updated_blocks[block_idx]
                 marked_sentence = f" {ADD_START}{sentence}{ADD_END}"
                 combined_text = normalize_paragraph_spacing(block.text + marked_sentence)
@@ -3614,6 +3835,8 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
         Returns:
             Updated blocks with keywords inserted.
         """
+        import sys
+
         updated_blocks = list(blocks)
 
         # Get original content for validation
@@ -3639,12 +3862,23 @@ Understanding [keyword1] is essential for [topic]. Many businesses benefit from 
             for keyword in keywords:
                 sentence = self._generate_single_keyword_sentence(keyword, topic)
                 if not sentence:
+                    print(f"    WARNING: Failed to generate sentence for '{keyword}' in section", file=sys.stderr)
                     continue
 
-                # Validate sentence
+                # Validate sentence (but don't reject just because it changed)
                 validated, _ = validate_and_fallback(sentence, full_original_text, "keyword_sentence")
-                if validated != sentence:
+
+                # Use validated sentence, but ensure keyword is still present
+                final_sentence = validated if validated else sentence
+                if keyword.lower() not in final_sentence.lower():
+                    final_sentence = sentence  # Fall back to original if keyword lost
+
+                # Skip only if keyword is genuinely missing
+                if keyword.lower() not in final_sentence.lower():
+                    print(f"    ERROR: Keyword '{keyword}' not in sentence, skipping", file=sys.stderr)
                     continue
+
+                sentence = final_sentence  # Use the validated/final sentence
 
                 # Append to the block at insertion point
                 block = updated_blocks[insertion_idx]

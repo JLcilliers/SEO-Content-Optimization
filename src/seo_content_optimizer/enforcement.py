@@ -932,3 +932,163 @@ def get_strip_additions_report(result: StripAdditionsResult) -> str:
             lines.append(f"    - {seg[:60]}...")
 
     return "\n".join(lines)
+
+
+# =============================================================================
+# ALLOWLIST ENFORCEMENT
+# =============================================================================
+
+
+@dataclass
+class AllowlistValidationResult:
+    """Result of allowlist validation for additions."""
+    valid: bool  # True if all additions contain only allowlisted keywords
+    total_additions: int  # Total number of marked additions
+    valid_additions: int  # Additions that contain allowlisted keywords
+    unauthorized_additions: list[str]  # Additions with no allowlisted keywords
+    unauthorized_keywords_detected: list[str]  # Keywords found that aren't allowed
+
+
+def validate_additions_against_allowlist(
+    marked_text: str,
+    allowlist: set[str],
+) -> AllowlistValidationResult:
+    """
+    Validate that all marked additions contain only allowlisted keywords.
+
+    CRITICAL for insert-only mode: Ensures the optimizer only inserts
+    the exact keywords provided by the user, not synonyms or variations.
+
+    Args:
+        marked_text: Text with [[[ADD]]]...[[[ENDADD]]] markers.
+        allowlist: Set of allowed keywords (case-insensitive).
+
+    Returns:
+        AllowlistValidationResult with validation details.
+    """
+    if not marked_text or MARK_START not in marked_text:
+        return AllowlistValidationResult(
+            valid=True,
+            total_additions=0,
+            valid_additions=0,
+            unauthorized_additions=[],
+            unauthorized_keywords_detected=[],
+        )
+
+    # Normalize allowlist to lowercase
+    normalized_allowlist = {kw.lower().strip() for kw in allowlist if kw.strip()}
+
+    # Extract all additions
+    pattern = re.compile(
+        rf"{re.escape(MARK_START)}(.*?){re.escape(MARK_END)}",
+        re.DOTALL
+    )
+    additions = pattern.findall(marked_text)
+
+    valid_additions = 0
+    unauthorized_additions = []
+
+    for addition in additions:
+        addition_lower = addition.lower().strip()
+
+        # Check if this addition contains any allowlisted keyword
+        has_allowed = any(kw in addition_lower for kw in normalized_allowlist)
+
+        if has_allowed:
+            valid_additions += 1
+        else:
+            unauthorized_additions.append(addition)
+
+    return AllowlistValidationResult(
+        valid=len(unauthorized_additions) == 0,
+        total_additions=len(additions),
+        valid_additions=valid_additions,
+        unauthorized_additions=unauthorized_additions,
+        unauthorized_keywords_detected=[],  # Could be enhanced to detect what was added
+    )
+
+
+def remove_unauthorized_additions(
+    marked_text: str,
+    allowlist: set[str],
+) -> tuple[str, int]:
+    """
+    Remove marked additions that don't contain any allowlisted keywords.
+
+    This is the ENFORCEMENT mechanism for keyword allowlist:
+    - Scans all [[[ADD]]]...[[[ENDADD]]] spans
+    - Removes any span that doesn't contain an allowlisted keyword
+    - Returns cleaned text and count of removed spans
+
+    Args:
+        marked_text: Text with [[[ADD]]]...[[[ENDADD]]] markers.
+        allowlist: Set of allowed keywords (case-insensitive).
+
+    Returns:
+        Tuple of (cleaned_text, removed_count).
+    """
+    if not marked_text or MARK_START not in marked_text:
+        return marked_text, 0
+
+    # Normalize allowlist to lowercase
+    normalized_allowlist = {kw.lower().strip() for kw in allowlist if kw.strip()}
+
+    # Find all additions and check each one
+    pattern = re.compile(
+        rf"({re.escape(MARK_START)})(.*?)({re.escape(MARK_END)})",
+        re.DOTALL
+    )
+
+    removed_count = 0
+
+    def check_and_keep(match):
+        nonlocal removed_count
+        content = match.group(2)
+        content_lower = content.lower().strip()
+
+        # Check if this addition contains any allowlisted keyword
+        has_allowed = any(kw in content_lower for kw in normalized_allowlist)
+
+        if has_allowed:
+            # Keep this addition
+            return match.group(0)
+        else:
+            # Remove this addition (return empty string)
+            removed_count += 1
+            return ""
+
+    cleaned_text = pattern.sub(check_and_keep, marked_text)
+
+    # Clean up any double spaces left behind
+    cleaned_text = re.sub(r"  +", " ", cleaned_text)
+
+    return cleaned_text, removed_count
+
+
+def get_allowlist_validation_report(result: AllowlistValidationResult) -> str:
+    """
+    Generate a human-readable report from allowlist validation.
+
+    Args:
+        result: AllowlistValidationResult from validate_additions_against_allowlist.
+
+    Returns:
+        Multi-line report string.
+    """
+    lines = ["Keyword Allowlist Validation:"]
+
+    if result.valid:
+        lines.append("  ✓ VALID: All additions contain only allowlisted keywords")
+    else:
+        lines.append("  ✗ INVALID: Found additions with unauthorized keywords")
+
+    lines.append(f"  Total additions: {result.total_additions}")
+    lines.append(f"  Valid additions: {result.valid_additions}")
+    lines.append(f"  Unauthorized: {len(result.unauthorized_additions)}")
+
+    if result.unauthorized_additions:
+        lines.append("  Unauthorized additions:")
+        for addition in result.unauthorized_additions[:5]:  # Limit to 5
+            lines.append(f"    - \"{addition[:60]}...\"" if len(addition) > 60 else f"    - \"{addition}\"")
+
+    return "\n".join(lines)

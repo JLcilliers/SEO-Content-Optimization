@@ -164,6 +164,10 @@ def _trafilatura_extraction_ladder(html: str, soup: BeautifulSoup) -> tuple[list
 
     Each stage checks extraction quality. If insufficient, escalates to next.
 
+    ANCHOR BLOCK PRESERVATION:
+    After extraction, scans HTML for short anchor blocks (stats like 18+, 235x, 95%)
+    that trafilatura may have filtered out, and merges them into the results.
+
     Args:
         html: Raw HTML content.
         soup: BeautifulSoup parsed HTML (for fallback).
@@ -172,6 +176,13 @@ def _trafilatura_extraction_ladder(html: str, soup: BeautifulSoup) -> tuple[list
         Tuple of (content_blocks, extraction_method_used).
     """
     import sys
+
+    # Pre-extract anchor blocks from HTML (stats like 18+, 235x, 95%)
+    # These are often filtered out by trafilatura but are critical content
+    anchor_soup = BeautifulSoup(html, "lxml")  # Fresh soup to avoid mutation
+    anchor_blocks = _extract_anchor_blocks_from_html(anchor_soup)
+    if anchor_blocks:
+        print(f"DEBUG: Found {len(anchor_blocks)} anchor blocks in HTML: {anchor_blocks}", file=sys.stderr)
 
     # Stage 1: Balanced extraction with favor_recall
     try:
@@ -187,6 +198,8 @@ def _trafilatura_extraction_ladder(html: str, soup: BeautifulSoup) -> tuple[list
         if content:
             blocks = _split_to_blocks(content)
             if _extraction_quality_ok(blocks, "trafilatura_favor_recall"):
+                # Merge anchor blocks that trafilatura missed
+                blocks = _merge_anchor_blocks(blocks, anchor_blocks)
                 return blocks, "trafilatura_favor_recall"
             print(f"DEBUG: Stage 1 insufficient ({len(blocks)} blocks), escalating...", file=sys.stderr)
     except Exception as e:
@@ -207,6 +220,8 @@ def _trafilatura_extraction_ladder(html: str, soup: BeautifulSoup) -> tuple[list
         if content:
             blocks = _split_to_blocks(content)
             if _extraction_quality_ok(blocks, "trafilatura_max_recall"):
+                # Merge anchor blocks that trafilatura missed
+                blocks = _merge_anchor_blocks(blocks, anchor_blocks)
                 return blocks, "trafilatura_max_recall"
             print(f"DEBUG: Stage 2 insufficient ({len(blocks)} blocks), escalating...", file=sys.stderr)
     except Exception as e:
@@ -222,6 +237,8 @@ def _trafilatura_extraction_ladder(html: str, soup: BeautifulSoup) -> tuple[list
                 if content:
                     blocks = _split_to_blocks(content)
                     if _extraction_quality_ok(blocks, "trafilatura_bare"):
+                        # Merge anchor blocks that trafilatura missed
+                        blocks = _merge_anchor_blocks(blocks, anchor_blocks)
                         return blocks, "trafilatura_bare"
                     print(f"DEBUG: Stage 3 insufficient ({len(blocks)} blocks), escalating...", file=sys.stderr)
     except Exception as e:
@@ -234,6 +251,8 @@ def _trafilatura_extraction_ladder(html: str, soup: BeautifulSoup) -> tuple[list
             if content:
                 blocks = _split_to_blocks(content)
                 if _extraction_quality_ok(blocks, "trafilatura_html2txt"):
+                    # Merge anchor blocks that trafilatura missed
+                    blocks = _merge_anchor_blocks(blocks, anchor_blocks)
                     return blocks, "trafilatura_html2txt"
                 print(f"DEBUG: Stage 4 insufficient ({len(blocks)} blocks), escalating...", file=sys.stderr)
     except Exception as e:
@@ -242,19 +261,163 @@ def _trafilatura_extraction_ladder(html: str, soup: BeautifulSoup) -> tuple[list
     # Stage 5: Final fallback - BeautifulSoup DOM extraction
     print(f"DEBUG: All trafilatura methods insufficient, using BeautifulSoup fallback", file=sys.stderr)
     blocks = _extract_content_fallback(soup)
+    # BeautifulSoup fallback should already capture anchor blocks, but merge just in case
+    blocks = _merge_anchor_blocks(blocks, anchor_blocks)
     return blocks, "beautifulsoup_fallback"
 
 
 def _split_to_blocks(content: str) -> list[str]:
-    """Split extracted content into paragraph blocks."""
+    """Split extracted content into paragraph blocks.
+
+    Preserves short anchor blocks like stats (18+, 235x, 95%) that
+    are critical content even though they're very short.
+    """
     if not content:
         return []
     # Split on double newlines (paragraph boundaries)
     paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
     # Also handle single newlines for list items etc.
     if len(paragraphs) < 3:
-        paragraphs = [p.strip() for p in content.split("\n") if p.strip() and len(p.strip()) > 10]
+        result = []
+        for p in content.split("\n"):
+            p = p.strip()
+            if not p:
+                continue
+            # Keep if long enough OR if it's an anchor block (stats, etc.)
+            if len(p) > 10 or _is_short_anchor_content(p):
+                result.append(p)
+        paragraphs = result
     return paragraphs
+
+
+def _is_short_anchor_content(text: str) -> bool:
+    """Check if a short text is critical anchor content (stats, numbers).
+
+    These should NEVER be filtered out even if very short:
+    - "18+" (age/quantity indicator)
+    - "235x" (multiplier)
+    - "95%" (percentage)
+    - "$100" (price)
+    """
+    import re
+    text = text.strip()
+    if not text or len(text) > 20:
+        return False
+
+    short_anchor_patterns = [
+        r'^\d+\+$',  # "18+" style
+        r'^\d+(?:\.\d+)?[xX]$',  # "235x", "19x"
+        r'^\d+(?:\.\d+)?\s*%$',  # "95%"
+        r'^\$\d+(?:,\d{3})*(?:\.\d{2})?$',  # "$100", "$1,000"
+        r'^\d+(?:,\d{3})+$',  # "1,000", "10,000"
+    ]
+    for pattern in short_anchor_patterns:
+        if re.match(pattern, text):
+            return True
+    return False
+
+
+def _extract_anchor_blocks_from_html(soup: BeautifulSoup) -> list[str]:
+    """
+    Extract short anchor blocks (stats, numbers) directly from HTML.
+
+    Trafilatura often filters out short stat blocks like "18+", "235x", "95%".
+    This function scans the HTML DOM to find and preserve these critical pieces.
+
+    Args:
+        soup: BeautifulSoup parsed HTML.
+
+    Returns:
+        List of anchor content strings (stats, numbers).
+    """
+    anchor_blocks: list[str] = []
+    seen_texts: set[str] = set()
+
+    # Remove unwanted elements first (copy soup to avoid modifying original)
+    for tag in soup.find_all(["script", "style", "noscript", "iframe"]):
+        tag.decompose()
+
+    # Look for short text in common stat/feature containers
+    # These are often displayed as prominent stats on landing pages
+    stat_containers = [
+        # Common stat/feature card patterns
+        soup.find_all(class_=re.compile(r'stat|number|metric|count|figure|highlight', re.I)),
+        soup.find_all(class_=re.compile(r'card|feature|benefit|value', re.I)),
+        # Direct short text in spans/divs
+        soup.find_all(['span', 'div', 'strong', 'b', 'p', 'h2', 'h3', 'h4']),
+    ]
+
+    for container_set in stat_containers:
+        for element in container_set:
+            # Get direct text (not nested)
+            text = element.get_text(strip=True)
+            if not text or text in seen_texts:
+                continue
+
+            # Check if it's short anchor content
+            if _is_short_anchor_content(text):
+                seen_texts.add(text)
+                anchor_blocks.append(text)
+                continue
+
+            # Also check for stats with context (e.g., "18+ Years")
+            # Short text that starts with a stat pattern
+            if len(text) < 50:
+                anchor_pattern = re.match(r'^(\d+\+|\d+[xX]|\d+%|\$[\d,]+)\s*(.*)$', text)
+                if anchor_pattern and text not in seen_texts:
+                    seen_texts.add(text)
+                    anchor_blocks.append(text)
+
+    return anchor_blocks
+
+
+def _merge_anchor_blocks(blocks: list[str], anchor_blocks: list[str]) -> list[str]:
+    """
+    Merge extracted anchor blocks into content blocks if missing.
+
+    Args:
+        blocks: Main content blocks from trafilatura.
+        anchor_blocks: Anchor blocks extracted from HTML.
+
+    Returns:
+        Merged list of content blocks.
+    """
+    if not anchor_blocks:
+        return blocks
+
+    # Create a set of existing content for fast lookup
+    existing_content = set()
+    for block in blocks:
+        existing_content.add(block.strip())
+        # Also add any short substrings that might be stats
+        for word in block.split():
+            if _is_short_anchor_content(word):
+                existing_content.add(word)
+
+    # Add anchor blocks that aren't already present
+    added_blocks: list[str] = []
+    for anchor in anchor_blocks:
+        anchor_clean = anchor.strip()
+        # Check if anchor content exists anywhere in existing blocks
+        found = False
+        for existing in existing_content:
+            if anchor_clean in existing or existing in anchor_clean:
+                found = True
+                break
+        if not found:
+            added_blocks.append(anchor_clean)
+
+    if added_blocks:
+        import sys
+        print(f"DEBUG: Added {len(added_blocks)} missing anchor blocks: {added_blocks}", file=sys.stderr)
+
+    # Insert anchor blocks near the beginning (after any title/intro)
+    # They're usually featured prominently on landing pages
+    if added_blocks and len(blocks) > 2:
+        return blocks[:2] + added_blocks + blocks[2:]
+    elif added_blocks:
+        return added_blocks + blocks
+    return blocks
 
 
 def _extraction_quality_ok(blocks: list[str], method: str) -> bool:
